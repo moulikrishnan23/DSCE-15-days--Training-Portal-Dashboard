@@ -1,7 +1,8 @@
 /****************************************************
  * DSCE / PPG TRAINING MANAGEMENT PORTAL
- * GOOGLE APPS SCRIPT BACKEND (OPTION A DYNAMIC ARCHITECTURE)
- * Supporting 15-Day Training & Dynamic Department Tabs + Sheet Management
+ * ULTRA HIGH-PERFORMANCE GOOGLE APPS SCRIPT BACKEND
+ * With Dynamic Department Filtering, Present Count Tracking,
+ * and Strict Day 15 Role Lock Enforcement
  ****************************************************/
 
 /***********************
@@ -14,7 +15,13 @@ const CONFIG = {
   TIMEZONE: 'Asia/Kolkata',
   APP_NAME: 'DSCE Training Management Portal',
   INSTITUTION_NAME: 'Dhanalakshmi Srinivasan College of Engineering, Coimbatore',
-  TOTAL_DAYS: 15
+  TOTAL_DAYS: 15,
+  CACHE_TTL: {
+    DEPT_LIST: 600,         // 10 minutes
+    TRAINING_DAYS: 180,     // 3 minutes
+    DASHBOARD: 120,         // 2 minutes
+    STUDENT_PROFILE: 300    // 5 minutes
+  }
 };
 
 /***********************
@@ -34,6 +41,45 @@ const ROLES = {
   COLLEGE_ADMIN: 'college admin',
   TRAINER: 'trainer'
 };
+
+/***********************
+ * SERVER-SIDE CACHE HELPERS
+ ***********************/
+
+function getFromCache_(key) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const cached = cache.get(key);
+    return cached ? JSON.parse(cached) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function putInCache_(key, data, ttlSeconds) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const str = JSON.stringify(data);
+    if (str.length < 95000) {
+      cache.put(key, str, ttlSeconds || 120);
+    }
+  } catch (e) {}
+}
+
+function clearAllServerCache_() {
+  try {
+    const cache = CacheService.getScriptCache();
+    cache.removeAll([
+      'dept_list',
+      'dept_names',
+      'training_day_status',
+      'dashboard_summary_rows',
+      'dashboard_data_All',
+      'att_summary_All',
+      'dash_rankings_All_default'
+    ]);
+  } catch (e) {}
+}
 
 /***********************
  * MAIN HTTP ROUTERS
@@ -96,7 +142,7 @@ function doPost(e) {
 
     // Strict Backend Day 15 Access Lock for College Admin
     if (userRole === ROLES.COLLEGE_ADMIN) {
-      if (action === 'getPostTestData' || action === 'getPrePostComparison') {
+      if (action === 'getPostTestData' || action === 'getPostTestPageData' || action === 'getPrePostComparison') {
         var dayStatus = handleGetTrainingDayStatus();
         if (!dayStatus.postTestVisible) {
           return jsonResponse({
@@ -108,6 +154,11 @@ function doPost(e) {
       }
     }
 
+    // Clear server cache on modifying actions
+    if (isWriteAction) {
+      clearAllServerCache_();
+    }
+
     // Route actions
     var result;
     switch (action) {
@@ -115,13 +166,13 @@ function doPost(e) {
         result = handleLogout(token);
         break;
       case 'getDashboardData':
-        result = handleGetDashboardData(actionArgs[0]); // depFilter optional
+        result = handleGetDashboardData(actionArgs[0], userRole);
         break;
       case 'getDashboardDepartmentAnalytics':
-        result = handleGetDashboardDepartmentAnalytics(actionArgs[0]);
+        result = handleGetDashboardDepartmentAnalytics(actionArgs[0], userRole);
         break;
       case 'getDashboardStudentRankings':
-        result = handleGetDashboardStudentRankings(actionArgs[0], actionArgs[1], actionArgs[2]); // limit, depFilter, testIndex
+        result = handleGetDashboardStudentRankings(actionArgs[0], actionArgs[1], actionArgs[2]);
         break;
       case 'rebuildDashboardSummary':
         result = rebuildDashboardSummary();
@@ -144,17 +195,26 @@ function doPost(e) {
       case 'getTestData':
         result = handleGetTestData(actionArgs[0], actionArgs[1]); // department, testIndex
         break;
+      case 'getTestsPageData':
+        result = handleGetTestsPageData(actionArgs[0], actionArgs[1]); // department, testIndex
+        break;
       case 'saveTestBlock':
         result = handleSaveTestBlock(actionArgs[0], actionArgs[1], actionArgs[2]); // department, records, testIndex
         break;
       case 'getPostTestData':
         result = handleGetPostTestData(actionArgs[0]); // department
         break;
+      case 'getPostTestPageData':
+        result = handleGetPostTestPageData(actionArgs[0]); // department
+        break;
       case 'savePostTestData':
         result = handleSavePostTestData(actionArgs[0], actionArgs[1]); // department, records
         break;
       case 'getMockInterviewData':
         result = handleGetMockInterviewData(actionArgs[0]); // department
+        break;
+      case 'getMockInterviewPageData':
+        result = handleGetMockInterviewPageData(actionArgs[0]); // department
         break;
       case 'saveMockInterviewData':
         result = handleSaveMockInterviewData(actionArgs[0], actionArgs[1]); // department, records
@@ -163,7 +223,7 @@ function doPost(e) {
         result = handleGetPrePostComparison();
         break;
       case 'getStudentProfile':
-        result = handleGetStudentProfile(actionArgs[0]); // regNo
+        result = handleGetStudentProfile(actionArgs[0], userRole); // regNo, userRole
         break;
       case 'getAllStudentsCount':
         result = handleGetAllStudentsCount(actionArgs[0]); // department optional
@@ -184,10 +244,10 @@ function doPost(e) {
         result = handleGetAdminSheetConfig();
         break;
       case 'addSheet':
-        result = handleAddSheet(actionArgs[0], actionArgs[1], actionArgs[2]); // sheetName, sheetType, department
+        result = handleAddSheet(actionArgs[0], actionArgs[1], actionArgs[2]);
         break;
       case 'removeSheet':
-        result = handleRemoveSheet(actionArgs[0]); // sheetName
+        result = handleRemoveSheet(actionArgs[0]);
         break;
       default:
         result = { success: false, message: 'Unknown API action: ' + action };
@@ -250,9 +310,13 @@ function ensureUsersSheet() {
 }
 
 /**
- * Discovers departments and room numbers dynamically by scanning Attendance_* sheets.
+ * Discovers departments and room numbers dynamically with caching.
  */
 function handleGetDepartmentList() {
+  const cacheKey = 'dept_list';
+  const cached = getFromCache_(cacheKey);
+  if (cached) return cached;
+
   var ss = getSpreadsheet();
   var sheets = ss.getSheets();
   var deptList = [];
@@ -283,11 +347,14 @@ function handleGetDepartmentList() {
 
   var departments = deptList.map(function(d) { return d.name; });
 
-  return {
+  const response = {
     success: true,
     departments: departments,
     departmentDetails: deptList
   };
+
+  putInCache_(cacheKey, response, CONFIG.CACHE_TTL.DEPT_LIST);
+  return response;
 }
 
 /***********************
@@ -390,7 +457,7 @@ function handleLogout(token) {
 }
 
 /***********************
- * DASHBOARD METRICS
+ * DASHBOARD METRICS (DYNAMIC & FAST)
  ***********************/
 
 const DASHBOARD_SUMMARY_SHEET = 'Dashboard_Summary';
@@ -430,6 +497,9 @@ function findDepartmentSheet_(ss, prefix, department) {
 }
 
 function getDSCEDepartments_(ss) {
+  const cached = getFromCache_('dept_names');
+  if (cached) return cached;
+
   var departmentsSet = {};
   ss.getSheets().forEach(function(sheet) {
     var name = sheet.getName().trim();
@@ -440,6 +510,8 @@ function getDSCEDepartments_(ss) {
   });
   var departments = Object.keys(departmentsSet);
   departments.sort();
+
+  putInCache_('dept_names', departments, CONFIG.CACHE_TTL.DEPT_LIST);
   return departments;
 }
 
@@ -531,55 +603,31 @@ function readDashboardSummary_(depFilter) {
     });
 }
 
-function handleGetDashboardData(depFilter) {
+/**
+ * Ultra-fast Unified Dashboard API with dynamic department filtering & Present Counts
+ */
+function handleGetDashboardData(depFilter, userRole) {
+  const cacheKey = 'dashboard_data_' + (depFilter || 'All') + '_' + (userRole || '');
+  const cached = getFromCache_(cacheKey);
+  if (cached) return cached;
+
   const ss = getSpreadsheet();
   const departments = getDSCEDepartments_(ss);
   const allSummaryRows = readDashboardSummary_('All');
   const isIndividualDept = depFilter && depFilter !== 'All';
   const targetDept = isIndividualDept ? normalizeDepartment_(depFilter) : null;
 
+  const dayStatus = handleGetTrainingDayStatus();
+  const isCollegeAdmin = userRole === ROLES.COLLEGE_ADMIN;
+  const hidePostTest = isCollegeAdmin && !dayStatus.postTestVisible;
+
+  const attendance = getLatestAttendanceSummary_(ss, depFilter);
+  const rankings = handleGetDashboardStudentRankings(10, depFilter);
+
   const rows = isIndividualDept
     ? allSummaryRows.filter(function(r) { return r.department.toLowerCase() === targetDept.toLowerCase(); })
     : allSummaryRows;
 
-  if (!rows.length) {
-    return {
-      success: true,
-      kpis: {
-        totalStudents: 0,
-        overallAttendancePct: 0,
-        preTestAverage: 0,
-        postTestAverage: 0,
-        averageImprovement: 0,
-        mockInterviewAvgScore: 0,
-        totalDepartments: departments.length,
-        trainingDay: 0,
-        totalTrainingDays: CONFIG.TOTAL_DAYS,
-        completedDays: 0,
-        remainingDays: CONFIG.TOTAL_DAYS,
-        presentToday: 0,
-        absentToday: 0,
-        halfDayToday: 0,
-        attendanceDateKey: null,
-        attendanceDateLabel: null
-      },
-      departmentSummary: allSummaryRows.map(function(r) {
-        return {
-          department: r.department,
-          count: r.students,
-          attendancePct: r.attendancePct,
-          preTestAverage: r.preTestAverage,
-          postTestAverage: r.postTestAverage,
-          improvement: r.improvement,
-          mockInterviewAvg: r.mockInterviewAvg
-        };
-      }),
-      topStudents: [],
-      leastStudents: []
-    };
-  }
-
-  // Calculate totals/averages based on whether a specific department or All is selected
   let totalStudents = 0;
   let overallAttendancePct = 0;
   let preTestAverage = 0;
@@ -590,36 +638,59 @@ function handleGetDashboardData(depFilter) {
   let postCount = 0;
   let mockCount = 0;
 
-  if (isIndividualDept) {
+  if (isIndividualDept && rows.length > 0) {
     const d = rows[0];
     totalStudents = d.students;
     overallAttendancePct = d.attendancePct;
     preTestAverage = d.preTestAverage;
-    postTestAverage = d.postTestAverage;
-    averageImprovement = d.improvement;
+    postTestAverage = hidePostTest ? 0 : d.postTestAverage;
+    averageImprovement = hidePostTest ? 0 : d.improvement;
     mockInterviewAvgScore = d.mockInterviewAvg;
     preCount = d.preTestCount;
-    postCount = d.postTestCount;
+    postCount = hidePostTest ? 0 : d.postTestCount;
     mockCount = d.mockInterviewCount;
-  } else {
-    totalStudents = rows.reduce(function(sum, r) { return sum + r.students; }, 0);
-    const attendanceWeight = rows.reduce(function(sum, r) { return sum + r.attendancePct * r.students; }, 0);
+  } else if (allSummaryRows.length > 0) {
+    totalStudents = allSummaryRows.reduce(function(sum, r) { return sum + r.students; }, 0);
+    const attendanceWeight = allSummaryRows.reduce(function(sum, r) { return sum + r.attendancePct * r.students; }, 0);
     overallAttendancePct = totalStudents ? attendanceWeight / totalStudents : 0;
-    const preWeight = rows.reduce(function(sum, r) { return sum + r.preTestAverage * r.preTestCount; }, 0);
-    preCount = rows.reduce(function(sum, r) { return sum + r.preTestCount; }, 0);
+    const preWeight = allSummaryRows.reduce(function(sum, r) { return sum + r.preTestAverage * r.preTestCount; }, 0);
+    preCount = allSummaryRows.reduce(function(sum, r) { return sum + r.preTestCount; }, 0);
     preTestAverage = preCount ? preWeight / preCount : 0;
-    const postWeight = rows.reduce(function(sum, r) { return sum + r.postTestAverage * r.postTestCount; }, 0);
-    postCount = rows.reduce(function(sum, r) { return sum + r.postTestCount; }, 0);
-    postTestAverage = postCount ? postWeight / postCount : 0;
-    averageImprovement = postCount && preCount ? postTestAverage - preTestAverage : 0;
-    const mockWeight = rows.reduce(function(sum, r) { return sum + r.mockInterviewAvg * r.mockInterviewCount; }, 0);
-    mockCount = rows.reduce(function(sum, r) { return sum + r.mockInterviewCount; }, 0);
+    
+    if (!hidePostTest) {
+      const postWeight = allSummaryRows.reduce(function(sum, r) { return sum + r.postTestAverage * r.postTestCount; }, 0);
+      postCount = allSummaryRows.reduce(function(sum, r) { return sum + r.postTestCount; }, 0);
+      postTestAverage = postCount ? postWeight / postCount : 0;
+      averageImprovement = postCount && preCount ? postTestAverage - preTestAverage : 0;
+    }
+
+    const mockWeight = allSummaryRows.reduce(function(sum, r) { return sum + r.mockInterviewAvg * r.mockInterviewCount; }, 0);
+    mockCount = allSummaryRows.reduce(function(sum, r) { return sum + r.mockInterviewCount; }, 0);
     mockInterviewAvgScore = mockCount ? mockWeight / mockCount : 0;
   }
 
-  const attendance = getLatestAttendanceSummary_(ss, depFilter);
+  // Build department summary rows with dynamic presentCount, absentCount, halfDayCount
+  const deptSummary = (isIndividualDept ? rows : allSummaryRows).map(function(r) {
+    const depAtt = (attendance.deptAttendance && attendance.deptAttendance[r.department])
+      ? attendance.deptAttendance[r.department]
+      : (isIndividualDept ? { present: attendance.presentToday, absent: attendance.absentToday, halfDay: attendance.halfDayToday } : { present: 0, absent: 0, halfDay: 0 });
 
-  return {
+    return {
+      department: r.department,
+      count: r.students,
+      students: r.students,
+      presentCount: depAtt.present,
+      absentCount: depAtt.absent,
+      halfDayCount: depAtt.halfDay,
+      attendancePct: r.attendancePct,
+      preTestAverage: r.preTestAverage,
+      postTestAverage: hidePostTest ? 0 : r.postTestAverage,
+      improvement: hidePostTest ? 0 : r.improvement,
+      mockInterviewAvg: r.mockInterviewAvg
+    };
+  });
+
+  const response = {
     success: true,
     kpis: {
       totalStudents: totalStudents,
@@ -640,86 +711,183 @@ function handleGetDashboardData(depFilter) {
       absentToday: attendance.absentToday,
       halfDayToday: attendance.halfDayToday,
       attendanceDateKey: attendance.dateKey,
-      attendanceDateLabel: attendance.dateLabel
+      attendanceDateLabel: attendance.dateLabel,
+      postTestUnlocked: !hidePostTest
     },
-    departmentSummary: allSummaryRows.map(function(r) {
+    departmentSummary: deptSummary,
+    allDepartmentsSummary: allSummaryRows.map(function(r) {
       return {
         department: r.department,
         count: r.students,
+        students: r.students,
         attendancePct: r.attendancePct,
         preTestAverage: r.preTestAverage,
-        postTestAverage: r.postTestAverage,
-        improvement: r.improvement,
+        postTestAverage: hidePostTest ? 0 : r.postTestAverage,
+        improvement: hidePostTest ? 0 : r.improvement,
         mockInterviewAvg: r.mockInterviewAvg
       };
     }),
-    topStudents: [],
-    leastStudents: []
+    topStudents: rankings.topStudents || [],
+    leastStudents: rankings.leastStudents || []
   };
+
+  putInCache_(cacheKey, response, CONFIG.CACHE_TTL.DASHBOARD);
+  return response;
 }
 
+/**
+ * Attendance Summary with per-department breakdown (Ultra-Fast 1-Pass)
+ */
 function getLatestAttendanceSummary_(ss, depFilter) {
-  const departments = depFilter && depFilter !== 'All' ? [depFilter] : getDSCEDepartments_(ss);
-  let latestDate = null, latestKey = '', latestTrainingDay = 0;
-  let present = 0, absent = 0, halfDay = 0;
+  const allDepts = getDSCEDepartments_(ss);
+  const departments = depFilter && depFilter !== 'All' ? [depFilter] : allDepts;
 
-  departments.forEach(function(dep) {
-    const sheet = findDepartmentSheet_(ss, 'Attendance_', dep);
-    if (!sheet || sheet.getLastColumn() < 4) return;
+  if (!departments.length) {
+    return {
+      presentToday: 0, absentToday: 0, halfDayToday: 0,
+      trainingDay: 1, totalTrainingDays: CONFIG.TOTAL_DAYS,
+      completedDays: 0, remainingDays: CONFIG.TOTAL_DAYS,
+      dateKey: null, dateLabel: 'Day 1',
+      deptAttendance: {}
+    };
+  }
 
-    const width = sheet.getLastColumn() - 3;
-    const block = sheet.getRange(8, 4, 6, width).getValues();
-    const presentCounts = block[0];
-    const absentCounts = block[1];
-    const dates = block[3];
-    const dayTypes = block[4];
-    const counters = block[5];
+  // Pre-index all sheets in 1 RPC roundtrip
+  const sheets = ss.getSheets();
+  const sheetsMap = {};
+  sheets.forEach(function(s) {
+    sheetsMap[s.getName().toLowerCase().trim()] = s;
+  });
 
-    let depLatestDate = null, depLatestCol = -1, depTrainingDay = 0;
+  function getSheetFast_(prefix, dep) {
+    const key = (prefix + dep).toLowerCase().trim();
+    return sheetsMap[key] || null;
+  }
 
-    for (let i = 0; i < dates.length; i++) {
-      const d = dates[i];
-      if (!(d instanceof Date) || String(dayTypes[i] || '').trim() !== 'Training Day') continue;
-      const pc = Number(presentCounts[i]) || 0;
-      const ac = Number(absentCounts[i]) || 0;
-      if ((pc > 0 || ac > 0) && (!depLatestDate || d.getTime() > depLatestDate.getTime())) {
-        depLatestDate = d;
-        depLatestCol = 4 + i;
-        depTrainingDay = Number(counters[i]) || 0;
+  // Step 1: Read schedule mapping from reference sheet
+  const refSheet = getSheetFast_('attendance_', allDepts[0] || departments[0]);
+  if (!refSheet || refSheet.getLastColumn() < 5) {
+    return {
+      presentToday: 0, absentToday: 0, halfDayToday: 0,
+      trainingDay: 1, totalTrainingDays: CONFIG.TOTAL_DAYS,
+      completedDays: 0, remainingDays: CONFIG.TOTAL_DAYS,
+      dateKey: null, dateLabel: 'Day 1',
+      deptAttendance: {}
+    };
+  }
+
+  const lastCol = refSheet.getLastColumn();
+  const width = lastCol - 4;
+  const schedBlock = refSheet.getRange(8, 5, 6, width).getValues();
+  const dayHeaders = schedBlock[2];
+  const dates = schedBlock[3];
+  const dayTypes = schedBlock[4];
+  const counters = schedBlock[5];
+
+  // Step 2: Detect latest marked training day (Sample first 3 department sheets for maximum speed)
+  let latestColIdx = -1;
+  let latestDate = null;
+  let latestTrainingDay = 0;
+
+  const sampleDepts = allDepts.slice(0, 3);
+  for (let d = 0; d < sampleDepts.length; d++) {
+    const sheet = getSheetFast_('attendance_', sampleDepts[d]);
+    if (!sheet) continue;
+    const sLastRow = sheet.getLastRow();
+    if (sLastRow < 14) continue;
+    const sWidth = Math.min(sheet.getLastColumn() - 4, width);
+    if (sWidth <= 0) continue;
+
+    const numStudents = Math.min(sLastRow - 13, 20); // sample first 20 students
+    const attMatrix = sheet.getRange(14, 5, numStudents, sWidth).getValues();
+
+    for (let c = sWidth - 1; c >= 0; c--) {
+      if (String(dayTypes[c] || '').trim() !== 'Training Day') continue;
+
+      let hasEntry = false;
+      for (let r = 0; r < attMatrix.length; r++) {
+        const v = String(attMatrix[r][c] || '').trim();
+        if (v === 'Present' || v === 'Absent' || v === 'Half Day') {
+          hasEntry = true;
+          break;
+        }
+      }
+
+      if (hasEntry) {
+        if (c > latestColIdx) {
+          latestColIdx = c;
+          latestDate = dates[c] instanceof Date ? dates[c] : null;
+          latestTrainingDay = Number(counters[c]) || (c + 1);
+        }
+        break;
       }
     }
+    if (latestColIdx >= 0) break; // Found latest day
+  }
 
-    if (!depLatestDate || depLatestCol < 0) return;
+  // Fallback to Day 1 if no entries
+  if (latestColIdx < 0) {
+    for (let c = 0; c < dayTypes.length; c++) {
+      if (String(dayTypes[c] || '').trim() === 'Training Day') {
+        latestColIdx = c;
+        latestDate = dates[c] instanceof Date ? dates[c] : null;
+        latestTrainingDay = Number(counters[c]) || 1;
+        break;
+      }
+    }
+  }
 
-    const key = Utilities.formatDate(depLatestDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
-    const strength = Math.max(0, Number(sheet.getRange(6, 14).getValue()) || 0);
-    const statuses = strength ? sheet.getRange(14, depLatestCol, Math.min(strength, 990), 1).getValues() : [];
+  // Step 3: Count Present, Absent, Half Day on latestColIdx across targeted departments
+  let totalPresent = 0, totalAbsent = 0, totalHalfDay = 0;
+  const deptAttendance = {};
+  const targetColNumber = 5 + (latestColIdx >= 0 ? latestColIdx : 0);
+  const targetDeptsToScan = depFilter && depFilter !== 'All' ? [depFilter] : allDepts;
+
+  targetDeptsToScan.forEach(function(dep) {
+    const sheet = getSheetFast_('attendance_', dep);
+    if (!sheet) return;
+    const sLastRow = sheet.getLastRow();
+    if (sLastRow < 14) return;
+    const numStudents = sLastRow - 13;
+
+    const colVals = sheet.getRange(14, targetColNumber, numStudents, 1).getValues();
     let dp = 0, da = 0, dh = 0;
-    statuses.forEach(function(row) {
-      const v = String(row[0] || '').trim();
+    for (let r = 0; r < colVals.length; r++) {
+      const v = String(colVals[r][0] || '').trim();
       if (v === 'Present') dp++;
       else if (v === 'Absent') da++;
       else if (v === 'Half Day') dh++;
-    });
-
-    if (!latestDate || key > latestKey) {
-      latestDate = depLatestDate; latestKey = key; latestTrainingDay = depTrainingDay;
-      present = dp; absent = da; halfDay = dh;
-    } else if (key === latestKey) {
-      present += dp; absent += da; halfDay += dh; latestTrainingDay = Math.max(latestTrainingDay, depTrainingDay);
     }
+
+    deptAttendance[dep] = { present: dp, absent: da, halfDay: dh };
+    totalPresent += dp;
+    totalAbsent += da;
+    totalHalfDay += dh;
   });
 
+  const hasAnyEntries = (totalPresent > 0 || totalAbsent > 0 || totalHalfDay > 0);
+  const completedDays = hasAnyEntries ? latestTrainingDay : 0;
+  const remainingDays = Math.max(CONFIG.TOTAL_DAYS - completedDays, 0);
+  const activeTrainingDay = hasAnyEntries ? (latestTrainingDay || 1) : 0;
+
   return {
-    presentToday: present, absentToday: absent, halfDayToday: halfDay,
-    trainingDay: latestTrainingDay, totalTrainingDays: CONFIG.TOTAL_DAYS,
-    completedDays: latestTrainingDay, remainingDays: Math.max(CONFIG.TOTAL_DAYS - latestTrainingDay, 0),
+    presentToday: totalPresent,
+    absentToday: totalAbsent,
+    halfDayToday: totalHalfDay,
+    trainingDay: activeTrainingDay,
+    totalTrainingDays: CONFIG.TOTAL_DAYS,
+    completedDays: completedDays,
+    remainingDays: remainingDays,
     dateKey: latestDate ? Utilities.formatDate(latestDate, CONFIG.TIMEZONE, 'yyyy-MM-dd') : null,
-    dateLabel: latestDate ? Utilities.formatDate(latestDate, CONFIG.TIMEZONE, 'dd MMM yyyy') : null
+    dateLabel: hasAnyEntries ? (latestDate ? Utilities.formatDate(latestDate, CONFIG.TIMEZONE, 'dd MMM yyyy') : (dayHeaders[latestColIdx] || 'Day 1')) : 'Not Started',
+    deptAttendance: deptAttendance
   };
 }
 
-function handleGetDashboardDepartmentAnalytics(depFilter) {
+function handleGetDashboardDepartmentAnalytics(depFilter, userRole) {
+  const dayStatus = handleGetTrainingDayStatus();
+  const hidePostTest = userRole === ROLES.COLLEGE_ADMIN && !dayStatus.postTestVisible;
+
   return readDashboardSummary_(depFilter).map(function(r) {
     return {
       department: r.department,
@@ -727,71 +895,162 @@ function handleGetDashboardDepartmentAnalytics(depFilter) {
       attendancePct: r.attendancePct,
       testAverage: r.preTestAverage,
       preTestAverage: r.preTestAverage,
-      postTestAverage: r.postTestAverage,
-      improvement: r.improvement,
+      postTestAverage: hidePostTest ? 0 : r.postTestAverage,
+      improvement: hidePostTest ? 0 : r.improvement,
       mockInterviewAvg: r.mockInterviewAvg
     };
   });
 }
 
 function handleGetDashboardStudentRankings(limit, depFilter, testIndex) {
+  const cacheKey = 'dash_rankings_' + (depFilter || 'All') + '_' + (testIndex || 'default');
+  const cached = getFromCache_(cacheKey);
+  if (cached) return cached;
+
   const ss = getSpreadsheet();
   const departments = depFilter && depFilter !== 'All' ? [depFilter] : getDSCEDepartments_(ss);
-  const rows = [];
+  const studentMap = {};
 
   departments.forEach(function(dep) {
+    // 1. Read PreTest / Test scores
     const pre = findDepartmentSheet_(ss, 'PreTest_Report_', dep);
-    if (!pre) return;
+    if (pre) {
+      const pLastRow = pre.getLastRow();
+      const pMaxCol = pre.getLastColumn();
+      if (pLastRow >= 6 && pMaxCol >= 4) {
+        const headerBlock = pre.getRange(1, 1, 5, pMaxCol).getValues();
+        const row1 = headerBlock[0];
+        const row5 = headerBlock[4];
 
-    const blocksRes = handleGetTestBlocks(dep);
-    const blocks = blocksRes.testBlocks || [];
-    if (!blocks.length) return;
-
-    let targetBlock = null;
-    const tIdx = testIndex !== undefined && testIndex !== null && testIndex !== '' ? Number(testIndex) : -1;
-
-    if (tIdx >= 0 && tIdx < blocks.length) {
-      targetBlock = blocks[tIdx];
-    } else {
-      // Find latest test block that has data
-      const lastRow = Math.min(Math.max(pre.getLastRow(), 6), 1003);
-      const values = pre.getRange(6, 1, lastRow - 5, pre.getLastColumn()).getValues();
-      for (let b = blocks.length - 1; b >= 0; b--) {
-        const blk = blocks[b];
-        const totColIndex = blk.startCol + 1; // 0-based index for Total
-        const hasScores = values.some(function(r) {
-          const v = r[totColIndex];
-          return v !== '' && v !== null && v !== 0 && v !== '0';
-        });
-        if (hasScores) {
-          targetBlock = blk;
-          break;
+        var blocks = [];
+        for (var c = 3; c < row1.length; c++) {
+          var lbl = String(row1[c] || '').trim();
+          if (lbl && (lbl.toLowerCase().indexOf('test') !== -1 || lbl.toLowerCase().indexOf('pre') !== -1)) {
+            var hasPct = (c + 3 < row5.length && String(row5[c + 3] || '').toLowerCase().indexOf('percent') !== -1);
+            blocks.push({ id: blocks.length, label: lbl, startCol: c + 1, hasPctCol: hasPct });
+          }
         }
+        if (!blocks.length) blocks.push({ id: 0, label: 'Pre Test 1', startCol: 4, hasPctCol: true });
+
+        const values = pre.getRange(6, 1, pLastRow - 5, pMaxCol).getValues();
+
+        // Identify which test blocks have actually been conducted (have at least one student with marks > 0)
+        const conductedBlocks = [];
+        blocks.forEach(function(blk) {
+          const totalCol = blk.startCol + 2;
+          let hasScores = false;
+          for (let r = 0; r < values.length; r++) {
+            const v = Number(values[r][totalCol - 1]);
+            if (v > 0) {
+              hasScores = true;
+              break;
+            }
+          }
+          if (hasScores) conductedBlocks.push(blk);
+        });
+
+        const activeBlocks = conductedBlocks.length > 0 ? conductedBlocks : [blocks[0]];
+
+        values.forEach(function(row) {
+          const regNo = String(row[1] || '').trim();
+          const name = String(row[2] || '').trim();
+          if (!name) return;
+
+          const key = (dep + '_' + regNo).toLowerCase();
+          if (!studentMap[key]) {
+            studentMap[key] = {
+              department: dep,
+              regNo: regNo,
+              name: name,
+              scores: [],
+              scoreBreakdown: []
+            };
+          }
+
+          activeBlocks.forEach(function(blk) {
+            const totalCol = blk.startCol + 2;
+            const pctCol = blk.hasPctCol ? blk.startCol + 3 : null;
+            const totalVal = row[totalCol - 1];
+            const pctVal = pctCol ? row[pctCol - 1] : null;
+
+            const total = (totalVal !== '' && totalVal !== null && totalVal !== undefined && totalVal !== 'A') ? Number(totalVal) || 0 : 0;
+            const pct = (pctVal !== null && pctVal !== '' && pctVal !== undefined && pctVal !== 'A') ? Number(pctVal) || 0 : total;
+            
+            // Only include in average if scored > 0
+            if (pct > 0) {
+              studentMap[key].scores.push(pct);
+              studentMap[key].scoreBreakdown.push({ label: blk.label, pct: pct });
+            }
+          });
+        });
       }
-      if (!targetBlock) targetBlock = blocks[0];
     }
 
-    if (!targetBlock) return;
+    // 2. Read Mock Interview scores
+    const mock = findDepartmentSheet_(ss, 'MockInterview_', dep);
+    if (mock) {
+      const mLastRow = mock.getLastRow();
+      const mMaxCol = mock.getLastColumn();
+      if (mLastRow >= 6 && mMaxCol >= 4) {
+        const mValues = mock.getRange(6, 1, mLastRow - 5, mMaxCol).getValues();
 
-    const lastRow = Math.min(Math.max(pre.getLastRow(), 6), 1003);
-    const totalCol = targetBlock.startCol + 2; // 1-based Total col
-    const pctCol = targetBlock.hasPctCol ? targetBlock.startCol + 3 : null;
-    const values = pre.getRange(6, 1, lastRow - 5, pre.getLastColumn()).getValues();
+        mValues.forEach(function(row) {
+          const regNo = String(row[1] || '').trim();
+          const name = String(row[2] || '').trim();
+          if (!name) return;
 
-    values.forEach(function(row) {
-      if (!row[2]) return;
-      const total = Number(row[totalCol - 1]);
-      if (!Number.isFinite(total)) return;
-      const pct = pctCol ? Number(row[pctCol - 1]) || 0 : (total / 100) * 100;
+          const key = (dep + '_' + regNo).toLowerCase();
+          if (!studentMap[key]) {
+            studentMap[key] = {
+              department: dep,
+              regNo: regNo,
+              name: name,
+              scores: [],
+              scoreBreakdown: []
+            };
+          }
+
+          const scoreVal = row[3];
+          const pctVal = mMaxCol >= 5 ? row[4] : null;
+
+          const score = (scoreVal !== '' && scoreVal !== null && scoreVal !== undefined && scoreVal !== 'A') ? Number(scoreVal) || 0 : 0;
+          const pct = (pctVal !== null && pctVal !== '' && pctVal !== undefined && pctVal !== 'A') ? Number(pctVal) || 0 : score;
+
+          // Only include in average if scored > 0
+          if (pct > 0) {
+            studentMap[key].scores.push(pct);
+            studentMap[key].scoreBreakdown.push({ label: 'Mock Interview', pct: pct });
+          }
+        });
+      }
+    }
+  });
+
+  // Calculate composite average percentage for each student (only averaging tests where score > 0)
+  const rows = [];
+  Object.keys(studentMap).forEach(function(k) {
+    const s = studentMap[k];
+    if (s.scores.length > 0) {
+      const sum = s.scores.reduce(function(a, b) { return a + b; }, 0);
+      const avgPct = sum / s.scores.length;
       rows.push({
-        department: dep,
-        regNo: String(row[1] || ''),
-        name: String(row[2] || ''),
-        score: total,
-        percentage: pct,
-        testName: targetBlock.label
+        department: s.department,
+        regNo: s.regNo,
+        name: s.name,
+        percentage: avgPct,
+        evalCount: s.scores.length,
+        testName: s.scoreBreakdown.map(function(b) { return b.label + ' (' + b.pct.toFixed(0) + '%)'; }).join(', ')
       });
-    });
+    } else {
+      rows.push({
+        department: s.department,
+        regNo: s.regNo,
+        name: s.name,
+        percentage: 0,
+        evalCount: 0,
+        testName: 'No graded assessments'
+      });
+    }
   });
 
   const topN = Number(limit) > 0 ? Number(limit) : 10;
@@ -800,7 +1059,9 @@ function handleGetDashboardStudentRankings(limit, depFilter, testIndex) {
   const leastStudents = rows.slice().sort(function(a, b) { return a.percentage - b.percentage; }).slice(0, topN)
     .map(function(r, i) { return Object.assign({ rank: i + 1 }, r); });
 
-  return { success: true, topStudents: topStudents, leastStudents: leastStudents };
+  const response = { success: true, topStudents: topStudents, leastStudents: leastStudents };
+  putInCache_(cacheKey, response, 180);
+  return response;
 }
 
 function rebuildDashboardSummary() {
@@ -810,6 +1071,7 @@ function rebuildDashboardSummary() {
     sheet.clearContents();
   }
   ensureDashboardSummarySheet_();
+  clearAllServerCache_();
   SpreadsheetApp.flush();
   return { success: true, message: 'Dashboard summary rebuilt successfully.' };
 }
@@ -930,6 +1192,7 @@ function handleSaveAttendance(department, dateColIdx, records) {
     }
   });
 
+  clearAllServerCache_();
   return { success: true, message: 'Attendance saved successfully for ' + targetDep };
 }
 
@@ -1029,7 +1292,7 @@ function handleSaveSyllabus(rowData) {
 }
 
 /***********************
- * PRE-TEST & DYNAMIC REGULAR TESTS MODULE
+ * PRE-TEST & DYNAMIC REGULAR TESTS MODULE (OPTIMIZED)
  ***********************/
 
 function handleGetTestBlocks(department) {
@@ -1127,6 +1390,15 @@ function handleGetTestData(department, testIndex) {
   };
 }
 
+/**
+ * Unified endpoint for the Tests page: loads tests, blocks, and student count in 1 single roundtrip
+ */
+function handleGetTestsPageData(department, testIndex) {
+  const testData = handleGetTestData(department, testIndex);
+  const countData = handleGetAllStudentsCount(department);
+  return Object.assign({}, testData, { totalStudents: countData.totalStudents || 0 });
+}
+
 function handleSaveTestBlock(department, records, testIndex) {
   var ss = getSpreadsheet();
   var targetDep = department || getFirstDepartment();
@@ -1156,6 +1428,7 @@ function handleSaveTestBlock(department, records, testIndex) {
     }
   });
 
+  clearAllServerCache_();
   return { success: true, message: 'Scores saved successfully for ' + (targetBlock.label || 'Test') + ' (' + targetDep + ')' };
 }
 
@@ -1191,11 +1464,12 @@ function handleAddNextTest(testLabel) {
     addedCount++;
   });
 
+  clearAllServerCache_();
   return { success: true, message: 'Test "' + (testLabel || 'New Test') + '" added dynamically across ' + addedCount + ' department sheets.' };
 }
 
 /***********************
- * POST-TEST MODULE
+ * POST-TEST MODULE (OPTIMIZED)
  ***********************/
 
 function handleGetPostTestData(department) {
@@ -1228,6 +1502,19 @@ function handleGetPostTestData(department) {
   return { success: true, department: targetDep, students: students };
 }
 
+/**
+ * Unified endpoint for the PostTest page: loads scores, total students, and Day 15 lock status in 1 roundtrip
+ */
+function handleGetPostTestPageData(department) {
+  const postData = handleGetPostTestData(department);
+  const countData = handleGetAllStudentsCount(department);
+  const dayStatus = handleGetTrainingDayStatus();
+  return Object.assign({}, postData, {
+    totalStudents: countData.totalStudents || 0,
+    postTestVisible: dayStatus.postTestVisible
+  });
+}
+
 function handleSavePostTestData(department, records) {
   var ss = getSpreadsheet();
   var targetDep = department || getFirstDepartment();
@@ -1245,11 +1532,12 @@ function handleSavePostTestData(department, records) {
     }
   });
 
+  clearAllServerCache_();
   return { success: true, message: 'PostTest scores saved for ' + targetDep };
 }
 
 /***********************
- * MOCK INTERVIEW MODULE
+ * MOCK INTERVIEW MODULE (OPTIMIZED)
  ***********************/
 
 function handleGetMockInterviewData(department) {
@@ -1282,6 +1570,15 @@ function handleGetMockInterviewData(department) {
   return { success: true, department: targetDep, students: students, hasRemarks: hasRemarks };
 }
 
+/**
+ * Unified endpoint for the Mock Interview page: loads evaluation data and count in 1 single roundtrip
+ */
+function handleGetMockInterviewPageData(department) {
+  const mockData = handleGetMockInterviewData(department);
+  const countData = handleGetAllStudentsCount(department);
+  return Object.assign({}, mockData, { totalStudents: countData.totalStudents || 0 });
+}
+
 function handleSaveMockInterviewData(department, records) {
   var ss = getSpreadsheet();
   var targetDep = department || getFirstDepartment();
@@ -1305,6 +1602,7 @@ function handleSaveMockInterviewData(department, records) {
     }
   });
 
+  clearAllServerCache_();
   return { success: true, message: 'Mock Interview evaluation saved for ' + targetDep };
 }
 
@@ -1338,29 +1636,48 @@ function handleGetPrePostComparison() {
 }
 
 /***********************
- * STUDENT PROFILE (360° DOSSIER)
+ * FAST TARGETED STUDENT PROFILE (360° DOSSIER)
  ***********************/
 
-function handleGetStudentProfile(regNo) {
+function handleGetStudentProfile(regNo, userRole) {
   if (!regNo) return { success: false, message: 'Register Number is required.' };
+  
+  const cacheKey = 'student_prof_' + String(regNo).trim() + '_' + (userRole || '');
+  const cached = getFromCache_(cacheKey);
+  if (cached) return cached;
+
   var ss = getSpreadsheet();
   var departments = getDSCEDepartments_(ss);
   var regStr = String(regNo).trim();
 
+  const dayStatus = handleGetTrainingDayStatus();
+  const isCollegeAdmin = userRole === ROLES.COLLEGE_ADMIN;
+  const hidePostTest = isCollegeAdmin && !dayStatus.postTestVisible;
+
   var profile = null;
+  var targetDep = null;
   var attendanceSummary = { present: 0, absent: 0, halfDay: 0, total: 0, percentage: 0 };
   var testScores = [];
   var postTestScore = null;
   var mockScore = null;
 
+  // Step 1: Find student in Attendance sheets
   for (var d = 0; d < departments.length; d++) {
     var dep = departments[d];
+    var attSheet = ss.getSheetByName('Attendance_' + dep);
+    if (!attSheet) continue;
 
-    // Attendance search
-    if (!profile) {
-      var attSheet = ss.getSheetByName('Attendance_' + dep);
-      if (attSheet) {
-        var attValues = attSheet.getDataRange().getValues();
+    var attValues = attSheet.getDataRange().getValues();
+    for (var r = 13; r < attValues.length; r++) {
+      if (String(attValues[r][1]).trim() === regStr) {
+        targetDep = dep;
+        profile = {
+          name: attValues[r][2],
+          regNo: regStr,
+          department: attValues[r][3] || dep,
+          sNo: attValues[r][0]
+        };
+
         var headerRow = attValues[9] || [];
         var tdCols = [];
         for (var c = 4; c < headerRow.length; c++) {
@@ -1368,55 +1685,54 @@ function handleGetStudentProfile(regNo) {
           if (!h || h.toLowerCase() === 'off' || h.toLowerCase().indexOf('attendance') !== -1) continue;
           tdCols.push(c);
         }
-        for (var r = 13; r < attValues.length; r++) {
-          if (String(attValues[r][1]).trim() === regStr) {
-            profile = {
-              name: attValues[r][2],
-              regNo: regStr,
-              department: attValues[r][3] || dep,
-              sNo: attValues[r][0]
-            };
-            var p = 0, a = 0, hd = 0, tot = 0;
-            for (var ti = 0; ti < tdCols.length; ti++) {
-              var v = String(attValues[r][tdCols[ti]] || '').trim();
-              if (v === 'Present') { p++; tot++; }
-              else if (v === 'Absent') { a++; tot++; }
-              else if (v === 'Half Day') { hd++; tot++; }
-            }
-            attendanceSummary = { present: p, absent: a, halfDay: hd, total: tot, percentage: tot ? Math.round((p / tot) * 100) : 0 };
-            break;
-          }
+
+        var p = 0, a = 0, hd = 0, tot = 0;
+        for (var ti = 0; ti < tdCols.length; ti++) {
+          var v = String(attValues[r][tdCols[ti]] || '').trim();
+          if (v === 'Present') { p++; tot++; }
+          else if (v === 'Absent') { a++; tot++; }
+          else if (v === 'Half Day') { hd++; tot++; }
         }
+        attendanceSummary = { present: p, absent: a, halfDay: hd, total: tot, percentage: tot ? Math.round((p / tot) * 100) : 0 };
+        break;
       }
     }
+    if (profile) break;
+  }
 
-    // PreTest (all dynamic test blocks)
-    var preSheet = ss.getSheetByName('PreTest_Report_' + dep);
-    if (preSheet && testScores.length === 0) {
-      var preValues = preSheet.getDataRange().getValues();
-      var blocksRes = handleGetTestBlocks(dep);
-      var blocks = blocksRes.testBlocks || [];
+  if (!profile || !targetDep) {
+    return { success: false, message: 'Student record not found for: ' + regNo };
+  }
 
-      for (var pr = 5; pr < preValues.length; pr++) {
-        if (String(preValues[pr][1]).trim() === regStr) {
-          for (var bi = 0; bi < blocks.length; bi++) {
-            var blk = blocks[bi];
-            var totalColIdx = blk.startCol + 1; // 0-based
-            var pctColIdx = blk.hasPctCol ? blk.startCol + 2 : null;
-            var total = Number(preValues[pr][totalColIdx]) || 0;
-            var pct = pctColIdx ? Number(preValues[pr][pctColIdx]) || 0 : (total / 100) * 100;
-            if (total > 0 || pct > 0 || bi === 0) {
-              testScores.push({ testName: blk.label, total: total, percentage: pct });
-            }
+  // Step 2: Directly open ONLY the student's department sheets
+  // PreTest
+  var preSheet = ss.getSheetByName('PreTest_Report_' + targetDep);
+  if (preSheet) {
+    var preValues = preSheet.getDataRange().getValues();
+    var blocksRes = handleGetTestBlocks(targetDep);
+    var blocks = blocksRes.testBlocks || [];
+
+    for (var pr = 5; pr < preValues.length; pr++) {
+      if (String(preValues[pr][1]).trim() === regStr) {
+        for (var bi = 0; bi < blocks.length; bi++) {
+          var blk = blocks[bi];
+          var totalColIdx = blk.startCol + 1;
+          var pctColIdx = blk.hasPctCol ? blk.startCol + 2 : null;
+          var total = Number(preValues[pr][totalColIdx]) || 0;
+          var pct = pctColIdx ? Number(preValues[pr][pctColIdx]) || 0 : (total / 100) * 100;
+          if (total > 0 || pct > 0 || bi === 0) {
+            testScores.push({ testName: blk.label, total: total, percentage: pct });
           }
-          break;
         }
+        break;
       }
     }
+  }
 
-    // PostTest
-    var postSheet = ss.getSheetByName('PostTest_Report_' + dep);
-    if (postSheet && !postTestScore) {
+  // PostTest (strictly hidden for College Admin until Day 15)
+  if (!hidePostTest) {
+    var postSheet = ss.getSheetByName('PostTest_Report_' + targetDep);
+    if (postSheet) {
       var postValues = postSheet.getDataRange().getValues();
       for (var ptr = 5; ptr < postValues.length; ptr++) {
         if (String(postValues[ptr][1]).trim() === regStr) {
@@ -1428,30 +1744,24 @@ function handleGetStudentProfile(regNo) {
         }
       }
     }
+  }
 
-    // MockInterview
-    var mockSheet = ss.getSheetByName('MockInterview_' + dep);
-    if (mockSheet && !mockScore) {
-      var mockValues = mockSheet.getDataRange().getValues();
-      for (var mr = 5; mr < mockValues.length; mr++) {
-        if (String(mockValues[mr][1]).trim() === regStr) {
-          mockScore = {
-            score: Number(mockValues[mr][3]) || 0,
-            percentage: Number(mockValues[mr][4]) || 0
-          };
-          break;
-        }
+  // MockInterview
+  var mockSheet = ss.getSheetByName('MockInterview_' + targetDep);
+  if (mockSheet) {
+    var mockValues = mockSheet.getDataRange().getValues();
+    for (var mr = 5; mr < mockValues.length; mr++) {
+      if (String(mockValues[mr][1]).trim() === regStr) {
+        mockScore = {
+          score: Number(mockValues[mr][3]) || 0,
+          percentage: Number(mockValues[mr][4]) || 0
+        };
+        break;
       }
     }
-
-    if (profile && testScores.length > 0 && postTestScore && mockScore) break;
   }
 
-  if (!profile) {
-    return { success: false, message: 'Student record not found for: ' + regNo };
-  }
-
-  return {
+  const response = {
     success: true,
     profile: profile,
     attendance: attendanceSummary,
@@ -1459,10 +1769,13 @@ function handleGetStudentProfile(regNo) {
     postTest: postTestScore,
     mockInterview: mockScore
   };
+
+  putInCache_(cacheKey, response, CONFIG.CACHE_TTL.STUDENT_PROFILE);
+  return response;
 }
 
 /***********************
- * ALL STUDENTS COUNT (HIGH PERFORMANCE)
+ * ALL STUDENTS COUNT (FAST SUMMARY READ)
  ***********************/
 
 function handleGetAllStudentsCount(depFilter) {
@@ -1500,43 +1813,38 @@ function handleAddSyllabusDepartment(departmentName) {
     sheet.getRange(4 + d, newStart).setValue('Day ' + d);
   }
 
+  clearAllServerCache_();
   return { success: true, message: 'Department "' + departmentName + '" added to Syllabus Tracker.' };
 }
 
 /***********************
- * TRAINING DAY STATUS
+ * TRAINING DAY STATUS (DYNAMICALLY COMPUTED)
  ***********************/
 
 function handleGetTrainingDayStatus() {
+  const cacheKey = 'training_day_status';
+  const cached = getFromCache_(cacheKey);
+  if (cached) return cached;
+
   var ss = getSpreadsheet();
-  var departments = getDSCEDepartments_(ss);
-  var maxDay = 0;
+  var attSummary = getLatestAttendanceSummary_(ss, 'All');
+  var completedDays = attSummary.completedDays || 0;
+  var currentTrainingDay = attSummary.trainingDay !== undefined ? attSummary.trainingDay : 0;
 
-  departments.forEach(function(dep) {
-    var sheet = ss.getSheetByName('Attendance_' + dep);
-    if (!sheet || sheet.getLastColumn() < 4) return;
+  // Post-Test is visible ONLY when Day 15 is reached (completedDays >= 14 or current training day is 15 with attendance)
+  var postTestVisible = completedDays >= 14 || (currentTrainingDay >= 15 && completedDays >= 1);
 
-    var width = sheet.getLastColumn() - 3;
-    if (width <= 0) return;
-    var countersRow = sheet.getRange(13, 4, 1, width).getValues()[0];
-    var dayTypesRow = sheet.getRange(12, 4, 1, width).getValues()[0];
-
-    for (var i = 0; i < countersRow.length; i++) {
-      var dayType = String(dayTypesRow[i] || '').trim();
-      if (dayType === 'Training Day') {
-        var dayNum = Number(countersRow[i]) || 0;
-        if (dayNum > maxDay) maxDay = dayNum;
-      }
-    }
-  });
-
-  return {
+  const response = {
     success: true,
-    completedDays: maxDay,
+    completedDays: completedDays,
+    trainingDay: currentTrainingDay,
     totalDays: CONFIG.TOTAL_DAYS,
-    isLastDay: maxDay >= CONFIG.TOTAL_DAYS - 1,
-    postTestVisible: maxDay >= 14
+    isLastDay: currentTrainingDay >= CONFIG.TOTAL_DAYS,
+    postTestVisible: postTestVisible
   };
+
+  putInCache_(cacheKey, response, CONFIG.CACHE_TTL.TRAINING_DAYS);
+  return response;
 }
 
 /***********************
@@ -1610,6 +1918,7 @@ function handleAddSheet(sheetName, sheetType, department) {
     sheet.appendRow(['Column 1', 'Column 2', 'Column 3', 'Column 4']);
   }
 
+  clearAllServerCache_();
   return { success: true, message: 'Sheet "' + targetName + '" created successfully.' };
 }
 
@@ -1626,6 +1935,7 @@ function handleRemoveSheet(sheetName) {
   }
 
   ss.deleteSheet(sheet);
+  clearAllServerCache_();
   return { success: true, message: 'Sheet "' + sheetName + '" removed successfully.' };
 }
 

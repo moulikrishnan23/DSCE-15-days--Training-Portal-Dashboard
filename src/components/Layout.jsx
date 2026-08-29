@@ -5,10 +5,10 @@ export const NAV_ITEMS = [
   { id: "attendance", label: "Attendance", icon: "✓" },
   // { id: "syllabus", label: "Syllabus Tracker", icon: "📅" },
   { id: "tests", label: "Pre-Test / Assessment", icon: "✎" },
-  // { id: "posttest", label: "Post-Test Report", icon: "📋", day15Only: true },
+  { id: "posttest", label: "Post-Test Report", icon: "📋", day15Only: true },
   { id: "mock", label: "Mock Interview", icon: "🗣️" },
   { id: "performance", label: "Student Performance", icon: "★" },
-  // { id: "prepost", label: "Pre vs Post Analytics", icon: "📈", day15Only: true },
+  { id: "prepost", label: "Pre vs Post Analytics", icon: "📈", day15Only: true },
   // { id: "sheetmanager", label: "Sheet Manager (Portal)", icon: "⚙️", adminOnly: true }
 ];
 

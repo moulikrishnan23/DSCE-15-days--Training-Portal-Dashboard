@@ -1,84 +1,80 @@
 import { useEffect, useState, useCallback } from "react";
 import { callServer } from "./services/appsScript";
-import Login from "./components/Login";
 import Layout from "./components/Layout";
+import Login from "./components/Login";
 import Dashboard from "./pages/Dashboard";
 import Attendance from "./pages/Attendance";
 import Syllabus from "./pages/Syllabus";
 import Tests from "./pages/Tests";
 import PostTest from "./pages/PostTest";
 import MockInterview from "./pages/MockInterview";
-import { PrePost } from "./pages/SimpleTables";
-import AdminSheetManager from "./pages/AdminSheetManager";
 import Performance from "./pages/Performance";
+import { PrePost } from "./pages/SimpleTables";
 
-const SESSION_KEY = "dsce_portal_session";
+const SESSION_KEY = "dsce_training_portal_session_v1";
 
 export default function App() {
-  const [user, setUser] = useState(() => {
-    try {
-      const saved = localStorage.getItem(SESSION_KEY);
-      return saved ? JSON.parse(saved).user || null : null;
-    } catch {
-      return null;
-    }
-  });
-
-  const [token, setToken] = useState(() => {
-    try {
-      const saved = localStorage.getItem(SESSION_KEY);
-      return saved ? JSON.parse(saved).token || null : null;
-    } catch {
-      return null;
-    }
-  });
-
+  const [token, setToken] = useState(null);
+  const [user, setUser] = useState(null);
   const [page, setPage] = useState("dashboard");
   const [departments, setDepartments] = useState([]);
   const [selectedDepartment, setSelectedDepartment] = useState("All");
-  const [trainingDayStatus, setTrainingDayStatus] = useState({ postTestVisible: false, completedDays: 0 });
-  const [restoring, setRestoring] = useState(Boolean(token));
+  const [trainingDayStatus, setTrainingDayStatus] = useState(null);
   const [toast, setToast] = useState({ message: "", type: "" });
+  const [restoring, setRestoring] = useState(true);
 
+  // Restore session
   useEffect(() => {
-    if (!token) {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) {
       setRestoring(false);
       return;
     }
 
-    let active = true;
-
-    async function restoreSession() {
-      try {
-        const result = await callServer("validateSession", token);
-
-        if (!active) return;
-
-        if (result?.success && result?.user) {
-          setUser(result.user);
-        } else {
-          console.warn("Session validation failed:", result);
-        }
-      } catch (error) {
-        console.warn("Session validation error:", error);
-      } finally {
-        if (active) {
-          setRestoring(false);
-        }
+    try {
+      const data = JSON.parse(raw);
+      if (data?.token && data?.user) {
+        callServer("validateSession", data.token)
+          .then((res) => {
+            if (res?.success && res?.user) {
+              setToken(data.token);
+              setUser(res.user);
+            } else {
+              localStorage.removeItem(SESSION_KEY);
+              setToken(null);
+              setUser(null);
+            }
+          })
+          .catch(() => {
+            setToken(data.token);
+            setUser(data.user);
+          })
+          .finally(() => setRestoring(false));
+      } else {
+        localStorage.removeItem(SESSION_KEY);
+        setRestoring(false);
       }
+    } catch {
+      localStorage.removeItem(SESSION_KEY);
+      setRestoring(false);
     }
+  }, []);
 
-    restoreSession();
-
-    return () => {
-      active = false;
-    };
+  // Sync token to window for legacy helpers
+  useEffect(() => {
+    if (token) {
+      window.__DSCE_SESSION_TOKEN__ = token;
+      window.SESSION_TOKEN = token;
+    } else {
+      delete window.__DSCE_SESSION_TOKEN__;
+      delete window.SESSION_TOKEN;
+    }
   }, [token]);
 
+  // Load departments & day status once authenticated
   useEffect(() => {
     if (!token) return;
 
-    // Load initial metadata in parallel with caching
     Promise.all([
       callServer("getDepartmentList", token),
       callServer("getTrainingDayStatus", token)
@@ -149,6 +145,10 @@ export default function App() {
 
   if (!user || !token) return <Login onLogin={login} />;
 
+  const role = (user?.role || "").toLowerCase();
+  const isCollegeAdmin = role.includes("college");
+  const postTestVisible = Boolean(trainingDayStatus?.postTestVisible);
+
   const propsCommon = {
     token,
     user,
@@ -169,7 +169,7 @@ export default function App() {
       content = <Tests {...propsCommon} />;
       break;
     case "posttest":
-      content = <PostTest {...propsCommon} />;
+      content = isCollegeAdmin && !postTestVisible ? <Dashboard {...propsCommon} /> : <PostTest {...propsCommon} />;
       break;
     case "mock":
       content = <MockInterview {...propsCommon} />;
@@ -178,10 +178,7 @@ export default function App() {
       content = <Performance {...propsCommon} />;
       break;
     case "prepost":
-      content = <PrePost {...propsCommon} />;
-      break;
-    case "sheetmanager":
-      content = <AdminSheetManager {...propsCommon} />;
+      content = isCollegeAdmin && !postTestVisible ? <Dashboard {...propsCommon} /> : <PrePost {...propsCommon} />;
       break;
     default:
       content = <Dashboard {...propsCommon} />;
@@ -197,7 +194,7 @@ export default function App() {
         departments={departments}
         selectedDepartment={selectedDepartment}
         onDepartmentChange={setSelectedDepartment}
-        postTestVisible={trainingDayStatus?.postTestVisible}
+        postTestVisible={postTestVisible}
         onLogout={logout}
       >
         {content}

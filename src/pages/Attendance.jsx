@@ -1,29 +1,35 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { callServer } from "../services/appsScript";
-import { LoadingSpinner, ErrorState, ReadOnlyNotice } from "../components/Common";
+import { LoadingSpinner, ErrorState, ReadOnlyNotice, Pagination, SkeletonTable } from "../components/Common";
 
 function downloadExcel(tableId, filename) {
   const table = document.getElementById(tableId);
   if (!table) return;
   const html = table.outerHTML;
-  const blob = new Blob(['\ufeff' + html], { type: 'application/vnd.ms-excel' });
+  const blob = new Blob(["\ufeff" + html], { type: "application/vnd.ms-excel" });
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename + '.xls'; a.click();
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = (filename || "Attendance") + ".xls";
+  a.click();
   URL.revokeObjectURL(url);
 }
 
 function downloadPdf(title, tableId) {
   const table = document.getElementById(tableId);
   if (!table) return;
-  const win = window.open('', '_blank');
-  win.document.write('<html><head><title>' + title + '</title>');
-  win.document.write('<style>body{font-family:Arial,sans-serif;padding:20px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left;font-size:12px}th{background:#0B3D5C;color:#fff}@media print{button{display:none}}</style>');
-  win.document.write('</head><body><h2>' + title + '</h2>');
+  const win = window.open("", "_blank");
+  win.document.write("<html><head><title>" + title + "</title>");
+  win.document.write(
+    "<style>body{font-family:Arial,sans-serif;padding:20px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left;font-size:12px}th{background:#0B3D5C;color:#fff}@media print{button,select{display:none}}</style>"
+  );
+  win.document.write("</head><body><h2>" + title + "</h2>");
   win.document.write(table.outerHTML);
-  win.document.write('</body></html>');
+  win.document.write("</body></html>");
   win.document.close();
-  win.onload = function() { win.print(); };
+  win.onload = function () {
+    win.print();
+  };
 }
 
 export default function Attendance({ token, user, selectedDepartment, onMessage }) {
@@ -34,17 +40,14 @@ export default function Attendance({ token, user, selectedDepartment, onMessage 
   const [saving, setSaving] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
 
   const role = (user?.role || "").toLowerCase();
   const isReadOnly = role.includes("college");
-  // Use real department name; default to first available instead of hardcoded "Dep1"
   const currentDep = selectedDepartment === "All" ? null : selectedDepartment;
 
-  useEffect(() => {
-    loadAttendance();
-  }, [token, currentDep]);
-
-  async function loadAttendance() {
+  const loadAttendance = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -59,18 +62,22 @@ export default function Attendance({ token, user, selectedDepartment, onMessage 
     } finally {
       setLoading(false);
     }
-  }
+  }, [token, currentDep]);
+
+  useEffect(() => {
+    loadAttendance();
+  }, [loadAttendance]);
 
   function handleStatusChange(studentRowIdx, status) {
     if (isReadOnly) return;
     setData((prev) => {
-      if (!prev) return prev;
+      if (!prev || !Array.isArray(prev.students)) return prev;
       const updated = prev.students.map((st) => {
         if (st.rowIdx === studentRowIdx) {
           return {
             ...st,
             attendance: {
-              ...st.attendance,
+              ...(st.attendance || {}),
               [selectedDayIdx]: status,
             },
           };
@@ -82,18 +89,18 @@ export default function Attendance({ token, user, selectedDepartment, onMessage 
   }
 
   async function handleSave() {
-    if (isReadOnly) return;
+    if (isReadOnly || !data || !Array.isArray(data.students)) return;
     setSaving(true);
     try {
       const records = data.students.map((st) => ({
         rowIdx: st.rowIdx,
-        status: st.attendance[selectedDayIdx] || "",
+        status: (st.attendance && st.attendance[selectedDayIdx]) || "",
       }));
 
       const res = await callServer(
         "saveAttendance",
         token,
-        data.department,
+        data.department || currentDep || "",
         selectedDayIdx,
         records
       );
@@ -110,28 +117,50 @@ export default function Attendance({ token, user, selectedDepartment, onMessage 
     }
   }
 
-  if (loading) return <LoadingSpinner />;
-  if (error) return <ErrorState message={error} onRetry={loadAttendance} />;
-
   const trainingDays = data?.trainingDays || [];
   const dates = data?.dates || [];
   const depName = data?.department || currentDep || "Department";
   const meta = data?.metadata || {};
 
-  const students = (data?.students || []).filter((s) => {
-    const matchesSearch = (s.name || "").toLowerCase().includes(searchTerm.toLowerCase()) || String(s.regNo || "").toLowerCase().includes(searchTerm.toLowerCase());
-    const sStatus = (s.attendance[selectedDayIdx] || "").trim();
-    const matchesFilter = statusFilter === "All" || (statusFilter === "Present" && sStatus === "Present") || (statusFilter === "Absent" && sStatus === "Absent") || (statusFilter === "Half Day" && sStatus === "Half Day");
-    return matchesSearch && matchesFilter;
-  });
+  const filteredStudents = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+    return (data?.students || []).filter((s) => {
+      const matchesSearch = !q || (s.name || "").toLowerCase().includes(q) || String(s.regNo || "").toLowerCase().includes(q);
+      const sStatus = (s.attendance && s.attendance[selectedDayIdx] !== undefined ? String(s.attendance[selectedDayIdx]) : "").trim();
+      const matchesFilter =
+        statusFilter === "All" ||
+        (statusFilter === "Present" && sStatus === "Present") ||
+        (statusFilter === "Absent" && sStatus === "Absent") ||
+        (statusFilter === "Half Day" && sStatus === "Half Day");
+      return matchesSearch && matchesFilter;
+    });
+  }, [data, searchTerm, selectedDayIdx, statusFilter]);
+
+  const paginatedStudents = useMemo(() => {
+    if (pageSize === "All") return filteredStudents;
+    const start = (page - 1) * pageSize;
+    return filteredStudents.slice(start, start + pageSize);
+  }, [filteredStudents, page, pageSize]);
+
+  if (loading && !data) {
+    return (
+      <div>
+        <ReadOnlyNotice user={user} />
+        <div className="panel">
+          <div className="skeleton-box" style={{ height: 24, width: "250px", marginBottom: 16 }} />
+          <SkeletonTable rows={10} cols={5} />
+        </div>
+      </div>
+    );
+  }
+  if (error && !data) return <ErrorState message={error} onRetry={loadAttendance} />;
 
   return (
     <div>
       <ReadOnlyNotice user={user} />
 
-      {/* Department metadata panel */}
       {meta.collegeName && (
-        <div className="panel" style={{ marginBottom: 12, padding: "10px 16px", background: "#f0f4ff" }}>
+        <div className="panel" style={{ marginBottom: 12, padding: "10px 16px", background: "var(--background)", border: "1px solid var(--border)" }}>
           <div style={{ display: "flex", gap: 24, flexWrap: "wrap", fontSize: 13 }}>
             <span><strong>Department:</strong> {meta.department || depName}</span>
             {meta.section && <span><strong>Section:</strong> {meta.section}</span>}
@@ -141,13 +170,17 @@ export default function Attendance({ token, user, selectedDepartment, onMessage 
         </div>
       )}
 
-      <div className="toolbar" style={{ justifyContent: "space-between" }}>
-        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-          <div className="field" style={{ margin: 0 }}>
-            <label>Select Training Day</label>
+      <div className="toolbar" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <div className="field" style={{ margin: 0, minWidth: 160 }}>
+            <label style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", display: "block", marginBottom: 2 }}>Training Day</label>
             <select
               value={selectedDayIdx}
-              onChange={(e) => setSelectedDayIdx(Number(e.target.value))}
+              onChange={(e) => {
+                setSelectedDayIdx(Number(e.target.value));
+                setPage(1);
+              }}
+              style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border)", width: "100%" }}
             >
               {trainingDays.map((dayLabel, idx) => (
                 <option key={idx} value={idx}>
@@ -158,19 +191,30 @@ export default function Attendance({ token, user, selectedDepartment, onMessage 
             </select>
           </div>
 
-          <div className="field search-box" style={{ margin: 0 }}>
-            <label>Search Student</label>
+          <div className="field search-box" style={{ margin: 0, minWidth: 200 }}>
+            <label style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", display: "block", marginBottom: 2 }}>Search Student</label>
             <input
               type="text"
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="Search by name or reg. number..."
+              onChange={(e) => {
+                setSearchTerm(e.target.value);
+                setPage(1);
+              }}
+              placeholder="🔍 Search name or reg no..."
+              style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid var(--border)", width: "100%" }}
             />
           </div>
 
-          <div className="field" style={{ margin: 0 }}>
-            <label>Status</label>
-            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <div className="field" style={{ margin: 0, minWidth: 120 }}>
+            <label style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", display: "block", marginBottom: 2 }}>Status</label>
+            <select
+              value={statusFilter}
+              onChange={(e) => {
+                setStatusFilter(e.target.value);
+                setPage(1);
+              }}
+              style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border)", width: "100%" }}
+            >
               <option value="All">All</option>
               <option value="Present">Present</option>
               <option value="Absent">Absent</option>
@@ -179,12 +223,12 @@ export default function Attendance({ token, user, selectedDepartment, onMessage 
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <button className="btn btn-outline" onClick={() => downloadExcel("attendance-table", `Attendance_${depName}_Day${selectedDayIdx+1}`)}>
-            📥 XLSX
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <button className="btn btn-outline" onClick={() => downloadExcel("attendance-table", `Attendance_${depName}_Day${selectedDayIdx + 1}`)}>
+            📥 Excel
           </button>
-          <button className="btn btn-outline" onClick={() => downloadPdf(`Attendance - ${depName} - Day ${selectedDayIdx+1}`, "attendance-table")}>
-            📥 PDF
+          <button className="btn btn-outline" onClick={() => downloadPdf(`Attendance - ${depName} - Day ${selectedDayIdx + 1}`, "attendance-table")}>
+            📄 PDF
           </button>
           {!isReadOnly && (
             <button className="btn btn-save" onClick={handleSave} disabled={saving}>
@@ -195,7 +239,7 @@ export default function Attendance({ token, user, selectedDepartment, onMessage 
       </div>
 
       <div className="panel">
-        <h3>
+        <h3 style={{ margin: "0 0 12px 0" }}>
           Daily Attendance Sheet ({depName}) — {trainingDays[selectedDayIdx] || `Day ${selectedDayIdx + 1}`}
         </h3>
 
@@ -203,22 +247,22 @@ export default function Attendance({ token, user, selectedDepartment, onMessage 
           <table className="data-table" id="attendance-table">
             <thead>
               <tr>
-                <th>S.No</th>
-                <th>Reg. Number</th>
-                <th>Student Name</th>
-                <th>Department</th>
-                <th>Status ({trainingDays[selectedDayIdx] || `Day ${selectedDayIdx + 1}`})</th>
+                <th style={{ width: "8%" }}>S.No</th>
+                <th style={{ width: "24%" }}>Reg. Number</th>
+                <th style={{ width: "36%" }}>Student Name</th>
+                <th style={{ width: "16%" }}>Department</th>
+                <th style={{ width: "16%" }}>Status ({trainingDays[selectedDayIdx] || `Day ${selectedDayIdx + 1}`})</th>
               </tr>
             </thead>
             <tbody>
-              {students.map((st) => {
-                const currentStatus = st.attendance[selectedDayIdx] || "";
+              {paginatedStudents.map((st) => {
+                const currentStatus = (st.attendance && st.attendance[selectedDayIdx]) || "";
                 return (
                   <tr key={st.rowIdx}>
                     <td>{st.sNo}</td>
-                    <td>{st.regNo || "N/A"}</td>
+                    <td style={{ fontWeight: 600, color: "var(--text-muted)" }}>{st.regNo || "N/A"}</td>
                     <td style={{ fontWeight: 600 }}>{st.name}</td>
-                    <td>{st.dept || ""}</td>
+                    <td><span className="pill pill-upcoming">{st.dept || depName}</span></td>
                     <td>
                       {isReadOnly ? (
                         <span className={`status-${(currentStatus || "").replace(/\s+/g, "")}`}>
@@ -240,16 +284,27 @@ export default function Attendance({ token, user, selectedDepartment, onMessage 
                   </tr>
                 );
               })}
-              {students.length === 0 && (
+              {paginatedStudents.length === 0 && (
                 <tr>
                   <td colSpan={5} className="empty-state">
-                    No student records found for {depName}.
+                    No student records found matching "{searchTerm}".
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
+
+        <Pagination
+          currentPage={page}
+          totalItems={filteredStudents.length}
+          pageSize={pageSize}
+          onPageChange={setPage}
+          onPageSizeChange={(sz) => {
+            setPageSize(sz);
+            setPage(1);
+          }}
+        />
       </div>
     </div>
   );

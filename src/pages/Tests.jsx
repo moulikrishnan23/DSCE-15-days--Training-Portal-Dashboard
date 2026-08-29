@@ -1,59 +1,66 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { callServer } from "../services/appsScript";
-import { LoadingSpinner, ErrorState, ReadOnlyNotice } from "../components/Common";
+import { LoadingSpinner, ErrorState, ReadOnlyNotice, Pagination, SkeletonTable } from "../components/Common";
 
-/* ─── Download helpers ─── */
 function downloadExcel(tableId, filename) {
   const table = document.getElementById(tableId);
   if (!table) return;
   const blob = new Blob(["\ufeff" + table.outerHTML], { type: "application/vnd.ms-excel" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url; a.download = (filename || "report") + ".xls"; a.click();
+  a.href = url;
+  a.download = (filename || "Assessment") + ".xls";
+  a.click();
   URL.revokeObjectURL(url);
 }
 
 function downloadPdf(title, tableId) {
   const table = document.getElementById(tableId);
   if (!table) return;
-  const w = window.open("", "_blank");
-  w.document.write("<html><head><title>" + title + "</title>");
-  w.document.write("<style>body{font-family:Arial,sans-serif;padding:20px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left;font-size:12px}th{background:#0B3D5C;color:#fff}@media print{button,input{display:none}}</style>");
-  w.document.write("</head><body><h2>" + title + "</h2>");
-  w.document.write(table.outerHTML);
-  w.document.write("</body></html>");
-  w.document.close();
-  w.onload = function () { w.print(); };
+  const win = window.open("", "_blank");
+  win.document.write("<html><head><title>" + title + "</title>");
+  win.document.write(
+    "<style>body{font-family:Arial,sans-serif;padding:20px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left;font-size:12px}th{background:#0B3D5C;color:#fff}@media print{button,input{display:none}}</style>"
+  );
+  win.document.write("</head><body><h2>" + title + "</h2>");
+  win.document.write(table.outerHTML);
+  win.document.write("</body></html>");
+  win.document.close();
+  win.onload = function () {
+    win.print();
+  };
 }
 
 export default function Tests({ token, user, selectedDepartment, onMessage }) {
   const [data, setData] = useState([]);
+  const [testBlocks, setTestBlocks] = useState([{ id: 0, label: "Pre Test 1", startCol: 4, hasPctCol: true }]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
-
-  // Search & Filter state
-  const [search, setSearch] = useState("");
-  const [sortBy, setSortBy] = useState("sNo");
-  const [sortDir, setSortDir] = useState("asc");
-  const [testBlocks, setTestBlocks] = useState([]);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [sortField, setSortField] = useState("total");
+  const [sortDirection, setSortDirection] = useState("desc");
   const [selectedTest, setSelectedTest] = useState(0);
   const [totalStudents, setTotalStudents] = useState(0);
   const [addingTest, setAddingTest] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
 
   const role = (user?.role || "").toLowerCase();
   const isReadOnly = role.includes("college");
   const canAddTest = role.includes("lesuccess") || role.includes("trainer");
   const currentDep = selectedDepartment === "All" ? null : selectedDepartment;
 
-  const loadTestScores = useCallback(async (testIdx = selectedTest) => {
+  // Single unified API endpoint loading test scores, blocks & total count in 1 request
+  const loadPageData = useCallback(async (testIdx = selectedTest) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await callServer("getTestData", token, currentDep || "", testIdx);
+      const res = await callServer("getTestsPageData", token, currentDep || "", testIdx);
       if (res?.success) {
         setData(res.students || []);
         if (res.testBlocks?.length) setTestBlocks(res.testBlocks);
+        setTotalStudents(res.totalStudents || res.students?.length || 0);
       } else {
         setError(res?.message || "Failed to load assessment scores.");
       }
@@ -64,31 +71,13 @@ export default function Tests({ token, user, selectedDepartment, onMessage }) {
     }
   }, [token, currentDep, selectedTest]);
 
-  const loadTestBlocks = useCallback(async () => {
-    try {
-      const res = await callServer("getTestBlocks", token, currentDep || "");
-      if (res?.success && res.testBlocks?.length) {
-        setTestBlocks(res.testBlocks);
-      }
-    } catch {}
-  }, [token, currentDep]);
-
-  const loadStudentCount = useCallback(async () => {
-    try {
-      const res = await callServer("getAllStudentsCount", token, selectedDepartment);
-      if (res?.success) setTotalStudents(res.totalStudents);
-    } catch {}
-  }, [token, selectedDepartment]);
-
   useEffect(() => {
-    loadTestBlocks();
-    loadStudentCount();
-    loadTestScores(selectedTest);
-  }, [loadTestBlocks, loadStudentCount, loadTestScores, selectedTest]);
+    loadPageData(selectedTest);
+  }, [loadPageData, selectedTest]);
 
   function handleTestChange(newIdx) {
     setSelectedTest(newIdx);
-    loadTestScores(newIdx);
+    setPage(1);
   }
 
   function handleScoreChange(rowIdx, field, val) {
@@ -127,53 +116,75 @@ export default function Tests({ token, user, selectedDepartment, onMessage }) {
   }
 
   async function handleAddNextTest() {
-    const label = prompt("Enter the new test name (e.g., Test 5):");
-    if (!label || !label.trim()) return;
+    if (!canAddTest) return;
+    const testNum = testBlocks.length + 1;
+    const testName = window.prompt(`Enter name for Test ${testNum}:`, `Test ${testNum}`);
+    if (!testName) return;
+
     setAddingTest(true);
     try {
-      const res = await callServer("addNextTest", token, label.trim());
+      const res = await callServer("addNextTest", token, testName.trim());
       if (res?.success) {
-        onMessage(res.message || "New test added successfully!", "success");
-        await loadTestBlocks();
+        onMessage(`Successfully added "${testName}" across all department sheets!`, "success");
+        await loadPageData(testBlocks.length);
+        setSelectedTest(testBlocks.length);
       } else {
-        onMessage(res?.message || "Failed to add test.", "error");
+        onMessage(res?.message || "Failed to add test block.", "error");
       }
     } catch (err) {
-      onMessage(err.message || "Failed to add test.", "error");
+      onMessage(err.message || "Error adding test block.", "error");
     } finally {
       setAddingTest(false);
     }
   }
 
-  /* Memoized Filter & Sort for high speed with large datasets */
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
+  const filteredData = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
     return data
-      .filter((st) => {
-        if (!q) return true;
-        return (st.name || "").toLowerCase().includes(q) || String(st.regNo || "").toLowerCase().includes(q);
-      })
+      .filter((s) => !q || (s.name || "").toLowerCase().includes(q) || String(s.regNo || "").toLowerCase().includes(q))
       .sort((a, b) => {
-        let va = a[sortBy], vb = b[sortBy];
-        if (typeof va === "string") { va = va.toLowerCase(); vb = (vb || "").toLowerCase(); }
-        else { va = Number(va) || 0; vb = Number(vb) || 0; }
-        return sortDir === "asc" ? (va > vb ? 1 : -1) : (va < vb ? 1 : -1);
+        let valA = a[sortField.toLowerCase()];
+        let valB = b[sortField.toLowerCase()];
+        if (sortField === "Name") {
+          valA = (a.name || "").toLowerCase();
+          valB = (b.name || "").toLowerCase();
+          return sortDirection === "asc" ? valA.localeCompare(valB) : valB.localeCompare(valA);
+        }
+        valA = parseFloat(valA) || 0;
+        valB = parseFloat(valB) || 0;
+        return sortDirection === "asc" ? valA - valB : valB - valA;
       });
-  }, [data, search, sortBy, sortDir]);
+  }, [data, searchTerm, sortField, sortDirection]);
 
-  /* Test-wise Top 10 / Least 10 */
+  // Paginated slice
+  const paginatedData = useMemo(() => {
+    if (pageSize === "All") return filteredData;
+    const start = (page - 1) * pageSize;
+    return filteredData.slice(start, start + pageSize);
+  }, [filteredData, page, pageSize]);
+
   const { top10, least10 } = useMemo(() => {
-    const sorted = [...data].sort((a, b) => (Number(b.percentage) || 0) - (Number(a.percentage) || 0));
+    const sorted = [...data].sort((a, b) => (parseFloat(b.percentage) || 0) - (parseFloat(a.percentage) || 0));
     return {
       top10: sorted.slice(0, 10),
-      least10: [...data].sort((a, b) => (Number(a.percentage) || 0) - (Number(b.percentage) || 0)).slice(0, 10)
+      least10: [...data].sort((a, b) => (parseFloat(a.percentage) || 0) - (parseFloat(b.percentage) || 0)).slice(0, 10),
     };
   }, [data]);
 
-  const testLabel = testBlocks[selectedTest]?.label || "Pre Test 1";
+  const activeTest = testBlocks[selectedTest] || testBlocks[0] || { label: "Pre Test 1", hasPctCol: true };
 
-  if (loading) return <LoadingSpinner />;
-  if (error) return <ErrorState message={error} onRetry={() => loadTestScores(selectedTest)} />;
+  if (loading && !data.length) {
+    return (
+      <div>
+        <ReadOnlyNotice user={user} />
+        <div className="panel">
+          <div className="skeleton-box" style={{ height: 24, width: "250px", marginBottom: 16 }} />
+          <SkeletonTable rows={10} cols={6} />
+        </div>
+      </div>
+    );
+  }
+  if (error && !data.length) return <ErrorState message={error} onRetry={() => loadPageData(selectedTest)} />;
 
   return (
     <div>
@@ -194,77 +205,105 @@ export default function Tests({ token, user, selectedDepartment, onMessage }) {
               {addingTest ? "Adding..." : "➕ Add Next Test"}
             </button>
           )}
+          <button className="btn btn-outline" onClick={() => downloadExcel("assessment-table", `Assessment_${currentDep || "All"}_${activeTest.label}`)}>
+            📥 Excel
+          </button>
+          <button className="btn btn-outline" onClick={() => downloadPdf(`Assessment - ${activeTest.label} - ${currentDep || "All"}`, "assessment-table")}>
+            📄 PDF
+          </button>
           {!isReadOnly && (
             <button className="btn btn-save" onClick={handleSave} disabled={saving}>
-              {saving ? "Saving..." : `💾 Save ${testLabel} Scores`}
+              {saving ? "Saving..." : `💾 Save ${activeTest.label}`}
             </button>
           )}
-          <button className="btn btn-outline" onClick={() => downloadExcel("test-table", `${testLabel}-${currentDep || "All"}`)}>📥 Excel</button>
-          <button className="btn btn-outline" onClick={() => downloadPdf(`${testLabel} — ${currentDep || "All"}`, "test-table")}>📄 PDF</button>
         </div>
       </div>
 
-      {/* Filters Bar */}
-      <div className="panel" style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 0 }}>
-        <input
-          type="text"
-          placeholder="🔍 Search by name or register number..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          style={{ padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 6, minWidth: 220 }}
-        />
-        <select
-          value={selectedTest}
-          onChange={(e) => handleTestChange(Number(e.target.value))}
-          style={{ padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 6, fontWeight: 600, color: "var(--primary)" }}
-        >
-          {testBlocks.map((tb) => (
-            <option key={tb.id} value={tb.id}>{tb.label}</option>
-          ))}
-        </select>
-        <select
-          value={sortBy}
-          onChange={(e) => setSortBy(e.target.value)}
-          style={{ padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 6 }}
-        >
-          <option value="sNo">Sort: S.No</option>
-          <option value="name">Sort: Name</option>
-          <option value="total">Sort: Total</option>
-          <option value="percentage">Sort: Percentage</option>
-        </select>
-        <select
-          value={sortDir}
-          onChange={(e) => setSortDir(e.target.value)}
-          style={{ padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 6 }}
-        >
-          <option value="asc">↑ Ascending</option>
-          <option value="desc">↓ Descending</option>
-        </select>
+      {/* Filter / Selector Bar */}
+      <div className="toolbar" style={{ gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+        <div className="field" style={{ margin: 0, minWidth: 200 }}>
+          <label style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", display: "block", marginBottom: 2 }}>
+            Selected Assessment
+          </label>
+          <select
+            value={selectedTest}
+            onChange={(e) => handleTestChange(Number(e.target.value))}
+            style={{ fontWeight: 600, padding: "8px 12px", borderRadius: 6, border: "1px solid var(--border)", width: "100%" }}
+          >
+            {testBlocks.map((blk) => (
+              <option key={blk.id} value={blk.id}>
+                {blk.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="field search-box" style={{ margin: 0, flex: 1, minWidth: 220 }}>
+          <label style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", display: "block", marginBottom: 2 }}>
+            Search Student
+          </label>
+          <input
+            type="text"
+            value={searchTerm}
+            onChange={(e) => {
+              setSearchTerm(e.target.value);
+              setPage(1);
+            }}
+            placeholder="🔍 Search name or reg no..."
+            style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid var(--border)", width: "100%" }}
+          />
+        </div>
+
+        <div className="field" style={{ margin: 0, minWidth: 160 }}>
+          <label style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", display: "block", marginBottom: 2 }}>
+            Sort By
+          </label>
+          <div style={{ display: "flex", gap: 4 }}>
+            <select
+              value={sortField}
+              onChange={(e) => setSortField(e.target.value)}
+              style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border)", flex: 1 }}
+            >
+              <option value="Name">Name</option>
+              <option value="total">Total Marks</option>
+              <option value="percentage">Percentage</option>
+            </select>
+            <button
+              className="btn btn-outline"
+              style={{ padding: "8px 12px" }}
+              onClick={() => setSortDirection((d) => (d === "asc" ? "desc" : "asc"))}
+            >
+              {sortDirection === "asc" ? "↑" : "↓"}
+            </button>
+          </div>
+        </div>
       </div>
 
-      {/* Main Test Data Table */}
+      {/* Main Assessment Scores Table */}
       <div className="panel">
         <div className="table-wrap">
-          <table className="data-table" id="test-table">
+          <table className="data-table" id="assessment-table">
             <thead>
               <tr>
-                <th>S.No</th>
-                <th>Reg. Number</th>
-                <th>Student Name</th>
-                <th>2 Marks (/50)</th>
-                <th>MCQ (/50)</th>
-                <th>Total Marks (/100)</th>
-                <th>Percentage</th>
+                <th style={{ width: "6%" }}>S.No</th>
+                <th style={{ width: "20%" }}>Reg. Number</th>
+                <th style={{ width: "30%" }}>Student Name</th>
+                <th style={{ width: "14%" }}>2 Marks</th>
+                <th style={{ width: "14%" }}>MCQ</th>
+                <th style={{ width: "16%" }}>Total (/100)</th>
+                {activeTest.hasPctCol && <th style={{ width: "14%" }}>Percentage</th>}
               </tr>
             </thead>
             <tbody>
-              {filtered.map((st) => (
+              {paginatedData.map((st) => (
                 <tr key={st.rowIdx}>
                   <td>{st.sNo}</td>
-                  <td>{st.regNo || "N/A"}</td>
+                  <td style={{ fontWeight: 600, color: "var(--text-muted)" }}>{st.regNo || "N/A"}</td>
                   <td style={{ fontWeight: 600 }}>{st.name}</td>
                   <td>
-                    {isReadOnly ? st.marks2 : (
+                    {isReadOnly ? (
+                      st.marks2
+                    ) : (
                       <input
                         type="number"
                         className="mark-input"
@@ -274,7 +313,9 @@ export default function Tests({ token, user, selectedDepartment, onMessage }) {
                     )}
                   </td>
                   <td>
-                    {isReadOnly ? st.mcq : (
+                    {isReadOnly ? (
+                      st.mcq
+                    ) : (
                       <input
                         type="number"
                         className="mark-input"
@@ -284,60 +325,80 @@ export default function Tests({ token, user, selectedDepartment, onMessage }) {
                     )}
                   </td>
                   <td style={{ fontWeight: 700, color: "var(--primary)" }}>{st.total}</td>
-                  <td style={{ fontWeight: 700, color: "var(--success)" }}>{st.percentage}%</td>
+                  {activeTest.hasPctCol && (
+                    <td style={{ fontWeight: 700, color: "var(--success)" }}>{st.percentage}%</td>
+                  )}
                 </tr>
               ))}
-              {filtered.length === 0 && (
-                <tr><td colSpan={7} className="empty-state">No student records found for {testLabel}.</td></tr>
+              {paginatedData.length === 0 && (
+                <tr>
+                  <td colSpan={activeTest.hasPctCol ? 7 : 6} className="empty-state">
+                    No student assessment records found.
+                  </td>
+                </tr>
               )}
             </tbody>
           </table>
         </div>
+
+        <Pagination
+          currentPage={page}
+          totalItems={filteredData.length}
+          pageSize={pageSize}
+          onPageChange={setPage}
+          onPageSizeChange={(sz) => {
+            setPageSize(sz);
+            setPage(1);
+          }}
+        />
       </div>
 
-      {/* Test-wise Top 10 / Least 10 */}
-      {data.length > 0 && (
-        <div className="chart-grid">
-          <div className="panel">
-            <h3>🏆 Top 10 Students — {testLabel}</h3>
-            <div className="table-wrap">
-              <table className="data-table">
-                <thead><tr><th>#</th><th>Student Name</th><th>Reg. No</th><th>Total</th><th>%</th></tr></thead>
-                <tbody>
-                  {top10.map((st, i) => (
-                    <tr key={st.rowIdx}>
-                      <td><strong>{i + 1}</strong></td>
-                      <td>{st.name}</td>
-                      <td>{st.regNo}</td>
-                      <td>{st.total}</td>
-                      <td style={{ color: "var(--success)", fontWeight: 700 }}>{st.percentage}%</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-          <div className="panel">
-            <h3>📉 Least 10 Students — {testLabel}</h3>
-            <div className="table-wrap">
-              <table className="data-table">
-                <thead><tr><th>#</th><th>Student Name</th><th>Reg. No</th><th>Total</th><th>%</th></tr></thead>
-                <tbody>
-                  {least10.map((st, i) => (
-                    <tr key={st.rowIdx}>
-                      <td><strong>{i + 1}</strong></td>
-                      <td>{st.name}</td>
-                      <td>{st.regNo}</td>
-                      <td>{st.total}</td>
-                      <td style={{ color: "var(--danger)", fontWeight: 700 }}>{st.percentage}%</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+      {/* Top 10 / Least 10 Performers */}
+      <div className="chart-grid" style={{ marginTop: 20 }}>
+        <div className="panel">
+          <h4 style={{ margin: "0 0 10px 0", color: "var(--success)" }}>🏆 Top 10 Performers — {activeTest.label}</h4>
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr><th>#</th><th>Name</th><th>Reg No</th><th>Total</th><th>%</th></tr>
+              </thead>
+              <tbody>
+                {top10.map((st, i) => (
+                  <tr key={i}>
+                    <td><strong>{i + 1}</strong></td>
+                    <td style={{ fontWeight: 600 }}>{st.name}</td>
+                    <td style={{ fontSize: 12, color: "var(--text-muted)" }}>{st.regNo}</td>
+                    <td>{st.total}</td>
+                    <td style={{ fontWeight: "bold", color: "var(--success)" }}>{st.percentage}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
-      )}
+
+        <div className="panel">
+          <h4 style={{ margin: "0 0 10px 0", color: "var(--danger)" }}>📉 Least 10 Performers — {activeTest.label}</h4>
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr><th>#</th><th>Name</th><th>Reg No</th><th>Total</th><th>%</th></tr>
+              </thead>
+              <tbody>
+                {least10.map((st, i) => (
+                  <tr key={i}>
+                    <td><strong>{i + 1}</strong></td>
+                    <td style={{ fontWeight: 600 }}>{st.name}</td>
+                    <td style={{ fontSize: 12, color: "var(--text-muted)" }}>{st.regNo}</td>
+                    <td>{st.total}</td>
+                    <td style={{ fontWeight: "bold", color: "var(--danger)" }}>{st.percentage}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

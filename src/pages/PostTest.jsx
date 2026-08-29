@@ -1,29 +1,35 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { callServer } from "../services/appsScript";
-import { LoadingSpinner, ErrorState, ReadOnlyNotice } from "../components/Common";
+import { LoadingSpinner, ErrorState, ReadOnlyNotice, Pagination, SkeletonTable } from "../components/Common";
 
 function downloadExcel(tableId, filename) {
   const table = document.getElementById(tableId);
   if (!table) return;
   const html = table.outerHTML;
-  const blob = new Blob(['\ufeff' + html], { type: 'application/vnd.ms-excel' });
+  const blob = new Blob(["\ufeff" + html], { type: "application/vnd.ms-excel" });
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = (filename || 'PostTest') + '.xls'; a.click();
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = (filename || "PostTest") + ".xls";
+  a.click();
   URL.revokeObjectURL(url);
 }
 
 function downloadPdf(title, tableId) {
   const table = document.getElementById(tableId);
   if (!table) return;
-  const win = window.open('', '_blank');
-  win.document.write('<html><head><title>' + title + '</title>');
-  win.document.write('<style>body{font-family:Arial,sans-serif;padding:20px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left;font-size:12px}th{background:#0B3D5C;color:#fff}@media print{button,input{display:none}}</style>');
-  win.document.write('</head><body><h2>' + title + '</h2>');
+  const win = window.open("", "_blank");
+  win.document.write("<html><head><title>" + title + "</title>");
+  win.document.write(
+    "<style>body{font-family:Arial,sans-serif;padding:20px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left;font-size:12px}th{background:#0B3D5C;color:#fff}@media print{button,input{display:none}}</style>"
+  );
+  win.document.write("</head><body><h2>" + title + "</h2>");
   win.document.write(table.outerHTML);
-  win.document.write('</body></html>');
+  win.document.write("</body></html>");
   win.document.close();
-  win.onload = function() { win.print(); };
+  win.onload = function () {
+    win.print();
+  };
 }
 
 export default function PostTest({ token, user, selectedDepartment, onMessage }) {
@@ -36,30 +42,24 @@ export default function PostTest({ token, user, selectedDepartment, onMessage })
   const [sortDirection, setSortDirection] = useState("desc");
   const [studentCount, setStudentCount] = useState(0);
   const [postTestVisible, setPostTestVisible] = useState(true);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
 
   const role = (user?.role || "").toLowerCase();
   const isReadOnly = role.includes("college");
   const currentDep = selectedDepartment === "All" ? null : selectedDepartment;
 
-  const loadPostTestScores = useCallback(async () => {
+  // Single unified API call returning post-test scores, total count & lock status
+  const loadPostTestData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [res, countRes, statusRes] = await Promise.all([
-        callServer("getPostTestData", token, currentDep || ""),
-        callServer("getAllStudentsCount", token, selectedDepartment),
-        callServer("getTrainingDayStatus", token)
-      ]);
-
-      if (statusRes?.success) {
-        setPostTestVisible(statusRes.postTestVisible !== false);
-      }
-      if (countRes?.success) {
-        setStudentCount(countRes.totalStudents || countRes.count || 0);
-      }
+      const res = await callServer("getPostTestPageData", token, currentDep || "");
 
       if (res?.success) {
         setData(res.students || []);
+        setStudentCount(res.totalStudents || res.students?.length || 0);
+        setPostTestVisible(res.postTestVisible !== false);
       } else {
         if (res?.locked) {
           setPostTestVisible(false);
@@ -76,11 +76,11 @@ export default function PostTest({ token, user, selectedDepartment, onMessage })
     } finally {
       setLoading(false);
     }
-  }, [token, currentDep, selectedDepartment]);
+  }, [token, currentDep]);
 
   useEffect(() => {
-    loadPostTestScores();
-  }, [loadPostTestScores]);
+    loadPostTestData();
+  }, [loadPostTestData]);
 
   function handleScoreChange(rowIdx, field, val) {
     if (isReadOnly) return;
@@ -135,16 +135,33 @@ export default function PostTest({ token, user, selectedDepartment, onMessage })
       });
   }, [data, searchTerm, sortField, sortDirection]);
 
+  // Paginated slice
+  const paginatedData = useMemo(() => {
+    if (pageSize === "All") return filteredData;
+    const start = (page - 1) * pageSize;
+    return filteredData.slice(start, start + pageSize);
+  }, [filteredData, page, pageSize]);
+
   const { top10, least10 } = useMemo(() => {
     const sorted = [...data].sort((a, b) => (parseFloat(b.percentage) || 0) - (parseFloat(a.percentage) || 0));
     return {
       top10: sorted.slice(0, 10),
-      least10: [...data].sort((a, b) => (parseFloat(a.percentage) || 0) - (parseFloat(b.percentage) || 0)).slice(0, 10)
+      least10: [...data].sort((a, b) => (parseFloat(a.percentage) || 0) - (parseFloat(b.percentage) || 0)).slice(0, 10),
     };
   }, [data]);
 
-  if (loading) return <LoadingSpinner />;
-  if (error) return <ErrorState message={error} onRetry={loadPostTestScores} />;
+  if (loading && !data.length) {
+    return (
+      <div>
+        <ReadOnlyNotice user={user} />
+        <div className="panel">
+          <div className="skeleton-box" style={{ height: 24, width: "250px", marginBottom: 16 }} />
+          <SkeletonTable rows={10} cols={6} />
+        </div>
+      </div>
+    );
+  }
+  if (error && !data.length) return <ErrorState message={error} onRetry={loadPostTestData} />;
 
   // Day 15 Strict Access Lock for College Admin
   if (isReadOnly && !postTestVisible) {
@@ -170,25 +187,32 @@ export default function PostTest({ token, user, selectedDepartment, onMessage })
             {studentCount} Students
           </span>
         </h3>
-        
+
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <div className="field search-box" style={{ margin: 0 }}>
             <input
               type="text"
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              onChange={(e) => {
+                setSearchTerm(e.target.value);
+                setPage(1);
+              }}
               placeholder="🔍 Search by name or reg no..."
               style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid var(--border)", minWidth: 200 }}
             />
           </div>
-          
+
           <div className="field" style={{ margin: 0, display: "flex", alignItems: "center", gap: 5 }}>
-            <select value={sortField} onChange={(e) => setSortField(e.target.value)} style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border)" }}>
+            <select
+              value={sortField}
+              onChange={(e) => setSortField(e.target.value)}
+              style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border)" }}
+            >
               <option value="Name">Sort: Name</option>
               <option value="total">Sort: Total</option>
               <option value="percentage">Sort: Percentage</option>
             </select>
-            <button className="btn btn-outline" style={{ padding: "6px 10px" }} onClick={() => setSortDirection(d => d === "asc" ? "desc" : "asc")}>
+            <button className="btn btn-outline" style={{ padding: "6px 10px" }} onClick={() => setSortDirection((d) => (d === "asc" ? "desc" : "asc"))}>
               {sortDirection === "asc" ? "↑" : "↓"}
             </button>
           </div>
@@ -213,17 +237,17 @@ export default function PostTest({ token, user, selectedDepartment, onMessage })
           <table className="data-table" id="posttest-table">
             <thead>
               <tr>
-                <th>S.No</th>
-                <th>Reg. Number</th>
-                <th>Student Name</th>
-                <th>MCQ Marks (/50)</th>
-                <th>2 Marks (/50)</th>
-                <th>Total Marks (/100)</th>
-                <th>Percentage</th>
+                <th style={{ width: "6%" }}>S.No</th>
+                <th style={{ width: "20%" }}>Reg. Number</th>
+                <th style={{ width: "30%" }}>Student Name</th>
+                <th style={{ width: "14%" }}>MCQ Marks (/50)</th>
+                <th style={{ width: "14%" }}>2 Marks (/50)</th>
+                <th style={{ width: "16%" }}>Total Marks (/100)</th>
+                <th style={{ width: "14%" }}>Percentage</th>
               </tr>
             </thead>
             <tbody>
-              {filteredData.map((st) => (
+              {paginatedData.map((st) => (
                 <tr key={st.rowIdx}>
                   <td>{st.sNo}</td>
                   <td>{st.regNo || "N/A"}</td>
@@ -253,12 +277,10 @@ export default function PostTest({ token, user, selectedDepartment, onMessage })
                     )}
                   </td>
                   <td style={{ fontWeight: 700, color: "var(--primary)" }}>{st.total}</td>
-                  <td style={{ fontWeight: 700, color: "var(--success)" }}>
-                    {st.percentage}%
-                  </td>
+                  <td style={{ fontWeight: 700, color: "var(--success)" }}>{st.percentage}%</td>
                 </tr>
               ))}
-              {filteredData.length === 0 && (
+              {paginatedData.length === 0 && (
                 <tr>
                   <td colSpan={7} className="empty-state">
                     No post-test records found for {currentDep || "any department"}.
@@ -268,6 +290,17 @@ export default function PostTest({ token, user, selectedDepartment, onMessage })
             </tbody>
           </table>
         </div>
+
+        <Pagination
+          currentPage={page}
+          totalItems={filteredData.length}
+          pageSize={pageSize}
+          onPageChange={setPage}
+          onPageSizeChange={(sz) => {
+            setPageSize(sz);
+            setPage(1);
+          }}
+        />
       </div>
 
       <div className="chart-grid" style={{ marginTop: 20 }}>
@@ -275,7 +308,9 @@ export default function PostTest({ token, user, selectedDepartment, onMessage })
           <h4 style={{ margin: "0 0 10px 0", color: "var(--success)" }}>🏆 Top 10 Students</h4>
           <div className="table-wrap">
             <table className="data-table">
-              <thead><tr><th>#</th><th>Name</th><th>Reg No</th><th>Total</th><th>%</th></tr></thead>
+              <thead>
+                <tr><th>#</th><th>Name</th><th>Reg No</th><th>Total</th><th>%</th></tr>
+              </thead>
               <tbody>
                 {top10.map((st, i) => (
                   <tr key={i}>
@@ -290,12 +325,14 @@ export default function PostTest({ token, user, selectedDepartment, onMessage })
             </table>
           </div>
         </div>
-        
+
         <div className="panel">
           <h4 style={{ margin: "0 0 10px 0", color: "var(--danger)" }}>📉 Least 10 Students</h4>
           <div className="table-wrap">
             <table className="data-table">
-              <thead><tr><th>#</th><th>Name</th><th>Reg No</th><th>Total</th><th>%</th></tr></thead>
+              <thead>
+                <tr><th>#</th><th>Name</th><th>Reg No</th><th>Total</th><th>%</th></tr>
+              </thead>
               <tbody>
                 {least10.map((st, i) => (
                   <tr key={i}>

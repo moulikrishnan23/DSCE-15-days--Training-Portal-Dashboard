@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { callServer } from "../services/appsScript";
-import { LoadingSpinner, ErrorState, ReadOnlyNotice, Modal } from "../components/Common";
+import { LoadingSpinner, ErrorState, ReadOnlyNotice, Modal, Pagination, SkeletonTable } from "../components/Common";
 import Chart from "chart.js/auto";
 
-export default function Performance({ token, user, selectedDepartment, onMessage }) {
+export default function Performance({ token, user, selectedDepartment, trainingDayStatus, onMessage }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -12,14 +12,17 @@ export default function Performance({ token, user, selectedDepartment, onMessage
   const [profileData, setProfileData] = useState(null);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileError, setProfileError] = useState(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+
+  const role = (user?.role || "").toLowerCase();
+  const isCollegeAdmin = role.includes("college");
+  const postTestVisible = Boolean(trainingDayStatus?.postTestVisible);
+  const hidePostTest = isCollegeAdmin && !postTestVisible;
 
   const currentDep = selectedDepartment === "All" ? null : selectedDepartment;
 
-  useEffect(() => {
-    loadStudents();
-  }, [token, currentDep]);
-
-  async function loadStudents() {
+  const loadStudents = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -34,7 +37,11 @@ export default function Performance({ token, user, selectedDepartment, onMessage
     } finally {
       setLoading(false);
     }
-  }
+  }, [token, currentDep]);
+
+  useEffect(() => {
+    loadStudents();
+  }, [loadStudents]);
 
   async function openProfile(student) {
     setSelectedStudent(student);
@@ -55,15 +62,28 @@ export default function Performance({ token, user, selectedDepartment, onMessage
     }
   }
 
-  const students = useMemo(() => {
+  const filteredStudents = useMemo(() => {
     const q = searchTerm.trim().toLowerCase();
-    return (data?.students || []).filter((s) =>
-      !q || (s.name || "").toLowerCase().includes(q) || String(s.regNo || "").toLowerCase().includes(q)
+    return (data?.students || []).filter(
+      (s) => !q || (s.name || "").toLowerCase().includes(q) || String(s.regNo || "").toLowerCase().includes(q)
     );
   }, [data, searchTerm]);
 
-  if (loading) return <LoadingSpinner />;
-  if (error) return <ErrorState message={error} onRetry={loadStudents} />;
+  const paginatedStudents = useMemo(() => {
+    if (pageSize === "All") return filteredStudents;
+    const start = (page - 1) * pageSize;
+    return filteredStudents.slice(start, start + pageSize);
+  }, [filteredStudents, page, pageSize]);
+
+  if (loading && !data) {
+    return (
+      <div className="panel">
+        <div className="skeleton-box" style={{ height: 24, width: "280px", marginBottom: 16 }} />
+        <SkeletonTable rows={10} cols={4} />
+      </div>
+    );
+  }
+  if (error && !data) return <ErrorState message={error} onRetry={loadStudents} />;
 
   return (
     <div>
@@ -74,56 +94,77 @@ export default function Performance({ token, user, selectedDepartment, onMessage
             <input
               type="text"
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              onChange={(e) => {
+                setSearchTerm(e.target.value);
+                setPage(1);
+              }}
               placeholder="🔍 Search by name or register number..."
               style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid var(--border)", width: "100%" }}
             />
           </div>
         </div>
 
-        <div className="table-wrap" style={{ maxHeight: "65vh" }}>
+        <div className="table-wrap" style={{ maxHeight: "60vh" }}>
           <table className="data-table">
             <thead>
               <tr>
-                <th style={{ width: "10%" }}>S.No</th>
-                <th style={{ width: "25%" }}>Reg. Number</th>
-                <th style={{ width: "40%" }}>Student Name</th>
-                <th style={{ width: "25%" }}>Department</th>
+                <th style={{ width: "8%" }}>S.No</th>
+                <th style={{ width: "24%" }}>Reg. Number</th>
+                <th style={{ width: "42%" }}>Student Name</th>
+                <th style={{ width: "26%" }}>Department</th>
               </tr>
             </thead>
             <tbody>
-              {students.map((st) => (
+              {paginatedStudents.map((st) => (
                 <tr
                   key={st.rowIdx}
                   onClick={() => openProfile(st)}
                   style={{ cursor: "pointer" }}
                   className="hover-row"
-                  title="Click to view student profile & test graph"
+                  title="Click to view student profile & test progression graph"
                 >
                   <td>{st.sNo}</td>
                   <td style={{ fontWeight: 600, color: "var(--text-muted)" }}>{st.regNo || "N/A"}</td>
                   <td style={{ fontWeight: 600, color: "var(--primary)" }}>{st.name}</td>
-                  <td><span className="pill pill-upcoming">{st.dept || data?.department || currentDep || "Department"}</span></td>
+                  <td>
+                    <span className="pill pill-upcoming">{st.dept || data?.department || currentDep || "Department"}</span>
+                  </td>
                 </tr>
               ))}
-              {students.length === 0 && (
+              {paginatedStudents.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="empty-state">No students found matching "{searchTerm}".</td>
+                  <td colSpan={4} className="empty-state">
+                    No students found matching "{searchTerm}".
+                  </td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
+
+        <Pagination
+          currentPage={page}
+          totalItems={filteredStudents.length}
+          pageSize={pageSize}
+          onPageChange={setPage}
+          onPageSizeChange={(sz) => {
+            setPageSize(sz);
+            setPage(1);
+          }}
+        />
       </div>
 
       {selectedStudent && (
         <Modal title={selectedStudent.name} onClose={() => setSelectedStudent(null)}>
           {profileLoading ? (
-            <LoadingSpinner />
+            <div style={{ padding: "40px 20px", textAlign: "center" }}>
+              <div className="spinner" style={{ margin: "0 auto 12px auto" }} />
+              <div style={{ fontSize: 13, color: "var(--text-muted)" }}>Loading student 360° dossier...</div>
+            </div>
           ) : profileError ? (
             <ErrorState message={profileError} />
           ) : profileData ? (
-            <StudentProfileView res={profileData} student={selectedStudent} />
+            <StudentProfileView res={profileData} student={selectedStudent} hidePostTest={hidePostTest} />
           ) : null}
         </Modal>
       )}
@@ -131,7 +172,7 @@ export default function Performance({ token, user, selectedDepartment, onMessage
   );
 }
 
-function StudentProfileView({ res, student }) {
+function StudentProfileView({ res, student, hidePostTest }) {
   const chartRef = useRef(null);
   const chartInstance = useRef(null);
 
@@ -153,7 +194,7 @@ function StudentProfileView({ res, student }) {
       scores.push(Number(t.percentage) || 0);
     });
 
-    if (postTest) {
+    if (postTest && !hidePostTest) {
       labels.push("Post Test");
       scores.push(Number(postTest.percentage) || 0);
     }
@@ -186,7 +227,7 @@ function StudentProfileView({ res, student }) {
           plugins: { legend: { display: false } },
           scales: {
             y: { beginAtZero: true, max: 100, ticks: { font: { size: 10 } } },
-            x: { ticks: { font: { size: 10 }, maxRotation: 45 } }
+            x: { ticks: { font: { size: 10 }, maxRotation: 45 } },
           },
         },
       });
@@ -195,7 +236,7 @@ function StudentProfileView({ res, student }) {
     return () => {
       if (chartInstance.current) chartInstance.current.destroy();
     };
-  }, [testScores, postTest, mockInterview]);
+  }, [testScores, postTest, mockInterview, hidePostTest]);
 
   return (
     <div>
@@ -204,7 +245,6 @@ function StudentProfileView({ res, student }) {
         <div><strong>Dept:</strong> <span className="pill pill-upcoming">{profile.department || student.dept}</span></div>
       </div>
 
-      {/* Compact 4-Card Attendance Grid */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 14 }}>
         <div style={{ background: "var(--background)", borderRadius: 6, padding: "8px 10px", textAlign: "center", border: "1px solid var(--border)" }}>
           <div style={{ fontSize: 10, color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 700 }}>Present</div>
@@ -224,8 +264,7 @@ function StudentProfileView({ res, student }) {
         </div>
       </div>
 
-      {/* Performance Progression Graph */}
-      {(testScores.length > 0 || postTest || mockInterview) && (
+      {(testScores.length > 0 || (postTest && !hidePostTest) || mockInterview) && (
         <div style={{ marginBottom: 14, background: "var(--background)", borderRadius: 6, padding: 10, border: "1px solid var(--border)" }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: "var(--primary)", marginBottom: 6 }}>Performance Progression Graph</div>
           <div style={{ height: 130 }}>
@@ -234,7 +273,6 @@ function StudentProfileView({ res, student }) {
         </div>
       )}
 
-      {/* Assessment Scores Table */}
       <div className="table-wrap" style={{ maxHeight: "160px" }}>
         <table className="data-table" style={{ fontSize: 12 }}>
           <thead>
@@ -252,7 +290,7 @@ function StudentProfileView({ res, student }) {
                 <td style={{ padding: "5px 8px", fontWeight: 700, color: "var(--primary)" }}>{t.percentage}%</td>
               </tr>
             ))}
-            {postTest && (
+            {postTest && !hidePostTest && (
               <tr>
                 <td style={{ padding: "5px 8px" }}>Post Test</td>
                 <td style={{ padding: "5px 8px" }}>{postTest.total}</td>
