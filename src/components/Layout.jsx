@@ -9,7 +9,7 @@ export const NAV_ITEMS = [
   { id: "mock", label: "Mock Interview", icon: "🗣️" },
   { id: "performance", label: "Student Performance", icon: "★" },
   // { id: "prepost", label: "Pre vs Post Analytics", icon: "📈", day15Only: true },
-  { id: "sheetmanager", label: "Sheet Manager (Portal)", icon: "⚙️", adminOnly: true }
+  // { id: "sheetmanager", label: "Sheet Manager (Portal)", icon: "⚙️", adminOnly: true }
 ];
 
 export default function Layout({
