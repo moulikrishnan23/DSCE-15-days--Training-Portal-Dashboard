@@ -2,8 +2,8 @@ import { useState } from "react";
 import { callServer } from "../services/appsScript";
 
 export default function Login({ onLogin }) {
-  const [userId, setUserId] = useState("1001");
-  const [password, setPassword] = useState("admin@lesuccess");
+  const [userId, setUserId] = useState("");
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
