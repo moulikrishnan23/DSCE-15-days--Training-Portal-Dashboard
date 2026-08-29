@@ -76,7 +76,7 @@ export default function Login({ onLogin }) {
 
         {error && <div id="loginError">{error}</div>}
 
-        <div style={{ marginTop: 24, paddingTop: 16, borderTop: "1px dashed var(--border)", textAlign: "left" }}>
+        {/* <div style={{ marginTop: 24, paddingTop: 16, borderTop: "1px dashed var(--border)", textAlign: "left" }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase" }}>
             Demo Quick Credentials
           </div>
@@ -109,7 +109,7 @@ export default function Login({ onLogin }) {
               <small>1003</small>
             </button>
           </div>
-        </div>
+        </div> */}
 
         <div className="login-footer">
           Dhanalakshmi Srinivasan College of Engineering & LeSuccess Portal
