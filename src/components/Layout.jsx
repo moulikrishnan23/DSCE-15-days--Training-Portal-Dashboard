@@ -45,7 +45,7 @@ export default function Layout({
       <div className="shell">
         <aside className={`sidebar ${open ? "open" : ""}`}>
           <div className="sidebar-brand">
-            <div className="logo-icon">D</div>
+            <div className="logo-icon" style={{marginRight:"10px"}}><img src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSI1shkPCjPeepEgAVgD9sYwiNaYlB5N-XTLZOTA-z2StUwdFcLMSswouU&s=10" alt="" width={50} height={50}/></div>
             <div className="name">
               DSCE Training
               <small>Management Portal</small>

@@ -25,7 +25,9 @@ export default function Login({ onLogin }) {
         setError(res?.message || "Invalid credentials.");
       }
     } catch (err) {
-      setError(err.message || "Failed to log in. Please check network connection.");
+      setError(
+        err.message || "Failed to log in. Please check network connection.",
+      );
     } finally {
       setLoading(false);
     }
@@ -41,7 +43,14 @@ export default function Login({ onLogin }) {
     <div id="loginScreen">
       <div className="login-card">
         <div className="brand-header">
-          <span className="brand-badge">DSCE Coimbatore</span>
+          <span className="">
+            <img
+              src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSI1shkPCjPeepEgAVgD9sYwiNaYlB5N-XTLZOTA-z2StUwdFcLMSswouU&s=10"
+              alt=""
+              width={100}
+              height={100}
+            />
+          </span>
         </div>
         <h1>DSCE Training Management</h1>
         <p className="sub">15-Day Training & Assessment Portal</p>
