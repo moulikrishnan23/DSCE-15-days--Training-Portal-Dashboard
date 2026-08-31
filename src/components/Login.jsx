@@ -43,17 +43,23 @@ export default function Login({ onLogin }) {
     <div id="loginScreen">
       <div className="login-card">
         <div className="brand-header">
-          <span className="">
-            <img
-              src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSI1shkPCjPeepEgAVgD9sYwiNaYlB5N-XTLZOTA-z2StUwdFcLMSswouU&s=10"
-              alt=""
-              width={100}
-              height={100}
-            />
-          </span>
+          <img
+            src="/logo.png"
+            alt="Dhanalakshmi Srinivasan College of Engineering"
+            width={85}
+            height={85}
+            className="login-logo"
+          />
+          <div className="brand-badge" style={{ marginTop: 12 }}>
+            Official Training Portal
+          </div>
         </div>
+
         <h1>DSCE Training Management</h1>
-        <p className="sub">15-Day Training & Assessment Portal</p>
+        <p className="sub">15-Day Placement Training & Assessment Portal</p>
+        <p className="login-affiliation">
+          Dhanalakshmi Srinivasan College of Engineering & LeSuccess
+        </p>
 
         <form onSubmit={handleSubmit}>
           <div className="field">
@@ -85,43 +91,16 @@ export default function Login({ onLogin }) {
 
         {error && <div id="loginError">{error}</div>}
 
-        {/* <div style={{ marginTop: 24, paddingTop: 16, borderTop: "1px dashed var(--border)", textAlign: "left" }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase" }}>
-            Demo Quick Credentials
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <button
-              type="button"
-              className="btn btn-outline"
-              style={{ fontSize: 11.5, justifyContent: "space-between" }}
-              onClick={() => applyPreset("1001", "admin@lesuccess")}
-            >
-              <span>🔑 <strong>LeSuccess Admin</strong> (Full + Portal)</span>
-              <small>1001</small>
-            </button>
-            <button
-              type="button"
-              className="btn btn-outline"
-              style={{ fontSize: 11.5, justifyContent: "space-between" }}
-              onClick={() => applyPreset("1002", "admin@dsce")}
-            >
-              <span>👁️ <strong>College Admin</strong> (Read-Only)</span>
-              <small>1002</small>
-            </button>
-            <button
-              type="button"
-              className="btn btn-outline"
-              style={{ fontSize: 11.5, justifyContent: "space-between" }}
-              onClick={() => applyPreset("1003", "trainer@123")}
-            >
-              <span>✎ <strong>Trainer</strong> (Operational Edit)</span>
-              <small>1003</small>
-            </button>
-          </div>
-        </div> */}
+        <div className="login-disclaimer">
+          🔒 <strong>Authorized Staff Only:</strong> This internal portal is restricted
+          to authorized DSCE faculty, trainers, and LeSuccess administrators.
+        </div>
 
         <div className="login-footer">
-          Dhanalakshmi Srinivasan College of Engineering & LeSuccess Portal
+          <div>Dhanalakshmi Srinivasan College of Engineering, Coimbatore</div>
+          <div style={{ marginTop: 4, opacity: 0.8 }}>
+            © DSCE & LeSuccess Training Management Portal. All rights reserved.
+          </div>
         </div>
       </div>
     </div>
